@@ -36,6 +36,17 @@ M.max_fret = 17
 -- behavior, so it stays the default.
 M.key_count = 0
 
+-- Panel colors (0xRRGGBBAA, ReaImGui's packed format), user-editable via
+-- ui_chrome.lua's "Colors" section: color_bg is the window background,
+-- color_fg is the single "ink" color covering noteheads/stems/text/staff
+-- lines/tab lines - just these two for now (see ui_chrome.lua's header for
+-- how secondary/dimmed elements like barlines and ties derive from them
+-- rather than needing their own settings). Defaults match this app's
+-- original hardcoded look (a dark panel, white ink) so existing users see
+-- no change until they open the Colors section.
+M.color_bg = 0x1E1E1EFF
+M.color_fg = 0xFFFFFFFF
+
 -- Hand-tuned cost weights for the fret-assignment DP (fret_heuristic.lua).
 -- No learned model at this scale - these are starting points, expected to
 -- be adjusted after eyeballing real test riffs (see plan's Phase 2

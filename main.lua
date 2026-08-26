@@ -76,13 +76,16 @@ local draw_tab = require('draw_tab')
 local draw_notation = require('draw_notation')
 local ui_chrome = require('ui_chrome')
 local note_editor = require('note_editor')
+local color_util = require('color_util')
 
 ui_chrome.load_persisted(config)
 
-local COLOR_BARLINE = 0x808080FF
+-- COLOR_PLAYHEAD is a fixed accent (the transport cursor) - not part of the
+-- user-configurable background/foreground palette (config.color_bg/
+-- color_fg, ui_chrome.lua's "Colors" section). Barline/label colors are
+-- computed fresh each frame from that palette instead (see main(), below),
+-- since they can change at runtime.
 local COLOR_PLAYHEAD = 0xFF6020FF
-local COLOR_MEASURE_LABEL = 0x909090FF
-local COLOR_TEMPO_LABEL = 0xC0C0C0FF
 local MIN_SYSTEM_WIDTH = 150 -- floor for a transiently tiny/collapsing window, so wrapping never degenerates
 local WINDOW_CHROME_RESERVE = 40 -- fixed estimate for window padding + a possible vertical scrollbar
 local BARLINE_NOTE_GAP = 14 -- px a barline is shifted left of its exact tick position, so it doesn't sit on top of the next measure's first note
@@ -180,6 +183,15 @@ local function main()
   local origin_x, origin_y = reaper.ImGui_GetCursorScreenPos(ctx)
   local _, avail_h = reaper.ImGui_GetContentRegionAvail(ctx)
 
+  -- Recomputed every frame (cheap) rather than cached, since the Colors
+  -- section can change config.color_fg/color_bg at any time - dim is the
+  -- shared "secondary ink" shade barlines/measure/tempo labels use, same
+  -- one draw_notation.lua/draw_tab.lua derive for their own staff lines/
+  -- ties/let-ring (see color_util.lua).
+  local color_dim = color_util.dim(config.color_fg, config.color_bg)
+  draw_notation.set_colors(config.color_fg, config.color_bg)
+  draw_tab.set_colors(config.color_fg, config.color_bg)
+
   -- Wrapping is a cheap post-process over the already-cached single-line
   -- layout, redone every frame against the current panel width - this is
   -- what makes resize/zoom "just work" with no separate cache-
@@ -253,7 +265,7 @@ local function main()
     local bar_top, bar_bottom = sys_origin_y, tab_origin_y + tab_staff_height
     for _, local_x in ipairs(system.barline_x) do
       local x = origin_x + local_x - BARLINE_NOTE_GAP
-      reaper.ImGui_DrawList_AddLine(draw_list, x, bar_top, x, bar_bottom, COLOR_BARLINE, 1.0)
+      reaper.ImGui_DrawList_AddLine(draw_list, x, bar_top, x, bar_bottom, color_dim, 1.0)
     end
 
     -- Measure numbers: item-relative (counted from this take's own start)
@@ -269,7 +281,7 @@ local function main()
       local measure_info = cached_measure_info[global_idx]
       local label = string.format("%d (R%d)", item_measure, measure_info.reaper_measure)
       local x = origin_x + system.barline_x[j] - BARLINE_NOTE_GAP
-      reaper.ImGui_DrawList_AddText(draw_list, x, bar_top - MEASURE_LABEL_ABOVE_GAP, COLOR_MEASURE_LABEL, label)
+      reaper.ImGui_DrawList_AddText(draw_list, x, bar_top - MEASURE_LABEL_ABOVE_GAP, color_dim, label)
 
       -- Tempo marking: at the very first measure of the piece, and
       -- wherever it changes from the previous measure - not on every
@@ -277,7 +289,7 @@ local function main()
       local prev_measure_info = cached_measure_info[global_idx - 1]
       if global_idx == 1 or not prev_measure_info or prev_measure_info.tempo ~= measure_info.tempo then
         local tempo_label = measure_info.tempo .. " BPM"
-        reaper.ImGui_DrawList_AddText(draw_list, x, bar_top - TEMPO_LABEL_ABOVE_GAP, COLOR_TEMPO_LABEL, tempo_label)
+        reaper.ImGui_DrawList_AddText(draw_list, x, bar_top - TEMPO_LABEL_ABOVE_GAP, color_dim, tempo_label)
       end
     end
 
@@ -333,11 +345,16 @@ local WINDOW_FLAGS = reaper.ImGui_WindowFlags_NoCollapse() | reaper.ImGui_Window
 
 local function loop()
   reaper.ImGui_SetNextWindowSize(ctx, 700, 420, reaper.ImGui_Cond_FirstUseEver())
+  -- config.color_bg (ui_chrome.lua's "Colors" section) overrides the
+  -- window background for just this window - pushed/popped every frame
+  -- since it can change at runtime, unlike a one-time style setup.
+  reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_WindowBg(), config.color_bg)
   local visible, open = reaper.ImGui_Begin(ctx, SCRIPT_TITLE, true, WINDOW_FLAGS)
   if visible then
     main()
     reaper.ImGui_End(ctx)
   end
+  reaper.ImGui_PopStyleColor(ctx)
   if open then
     reaper.defer(loop)
   end

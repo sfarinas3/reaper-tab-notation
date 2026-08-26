@@ -93,12 +93,23 @@
 local config = require('config')
 local notation_model = require('notation_model')
 local layout_engine = require('layout_engine')
+local color_util = require('color_util')
 
 local M = {}
 
+-- Defaults match config.lua's pre-Colors-section look; M.set_colors
+-- overwrites these once per frame from config.color_fg/color_bg (main.lua
+-- calls it before drawing) so every drawing function below can keep
+-- referencing these as plain module-level constants.
 local COLOR_LINE = 0x808080FF
 local COLOR_NOTE = 0xFFFFFFFF
 local COLOR_LET_RING = 0xC0C0C0FF
+
+function M.set_colors(fg, bg)
+  COLOR_NOTE = fg
+  COLOR_LINE = color_util.dim(fg, bg)
+  COLOR_LET_RING = COLOR_LINE
+end
 
 -- Diatonic offsets from middle C for each staff's 5 lines, bottom to top.
 local TREBLE_OFFSETS = { 2, 4, 6, 8, 10 }   -- E4 G4 B4 D5 F5

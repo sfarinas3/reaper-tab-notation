@@ -45,14 +45,26 @@
 local config = require('config')
 local notation_model = require('notation_model')
 local layout_engine = require('layout_engine')
+local color_util = require('color_util')
 
 local M = {}
 
+-- Defaults match config.lua's pre-Colors-section look; M.set_colors
+-- overwrites these once per frame from config.color_fg/color_bg (main.lua
+-- calls it before drawing). COLOR_UNREACHABLE/COLOR_TECHNIQUE stay fixed -
+-- they're semantic accent colors (an unplayable note, a technique marker),
+-- not part of the "everything else" ink this app's Colors section covers.
 local COLOR_LINE = 0x808080FF
 local COLOR_TEXT = 0xFFFFFFFF
 local COLOR_TIE = 0xC0C0C0FF
 local COLOR_UNREACHABLE = 0xFF4040FF
 local COLOR_TECHNIQUE = 0xFFC040FF
+
+function M.set_colors(fg, bg)
+  COLOR_TEXT = fg
+  COLOR_LINE = color_util.dim(fg, bg)
+  COLOR_TIE = COLOR_LINE
+end
 
 local TAB_LABEL_X_OFFSET = 4 -- px right of the staff start where the "TAB" label sits
 local TAB_LABEL_LINE_HEIGHT = 12 -- px between the stacked T/A/B letters

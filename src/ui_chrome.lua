@@ -2,12 +2,17 @@
 -- instrument" preset - currently Guitar/Shamisen, see INSTRUMENTS), string
 -- count, tuning (per-string note names, or a preset), capo, and max fret
 -- in one collapsible "Instrument Settings" section, key signature in its
--- own separate "Key Signature" section - the pieces of Phase 5 polish that
--- needed an actual UI rather than just a config.lua constant, since these
--- are properties a user genuinely wants to change per-project without
--- editing source. Embedded at the top of the same docked window rather
--- than a separate script/dialog, so both are always one click away and
--- share REAPER's own docking for free.
+-- own separate "Key Signature" section, and a "Colors" section with just
+-- two options - background and one foreground "ink" color covering
+-- everything else (noteheads, stems, text, staff/tab lines) - rather than
+-- per-element colors, at least for now (see color_util.lua for how
+-- secondary/dimmed elements like barlines and ties derive from those same
+-- two colors instead of needing their own settings) - the pieces of
+-- Phase 5 polish that needed an actual UI rather than just a config.lua
+-- constant, since these are properties a user genuinely wants to change
+-- per-project without editing source. Embedded at the top of the same
+-- docked window rather than a separate script/dialog, so both are always
+-- one click away and share REAPER's own docking for free.
 --
 -- Every string-count/tuning-scoped module (fret_heuristic.lua,
 -- notation_model.lua, draw_tab.lua, draw_notation.lua, layout_engine.lua)
@@ -227,6 +232,11 @@ function M.save_persisted(cfg)
   reaper.SetExtState(EXT_SECTION, "key_count", tostring(cfg.key_count or 0), true)
   reaper.SetExtState(EXT_SECTION, "max_fret", tostring(cfg.max_fret), true)
   reaper.SetExtState(EXT_SECTION, "instrument", cfg.instrument or "Guitar", true)
+  -- Colors are a global display preference (not an instrument/tuning
+  -- property), so unlike the fields above they're only ever saved here -
+  -- there's no save_for_take counterpart for them.
+  reaper.SetExtState(EXT_SECTION, "color_bg", tostring(cfg.color_bg), true)
+  reaper.SetExtState(EXT_SECTION, "color_fg", tostring(cfg.color_fg), true)
 end
 
 -- Applies any persisted tuning/capo over config's defaults. Call once at
@@ -267,6 +277,18 @@ function M.load_persisted(cfg)
   local instrument_str = reaper.GetExtState(EXT_SECTION, "instrument")
   if instrument_str and instrument_str ~= "" then
     cfg.instrument = instrument_str
+  end
+
+  local bg_str = reaper.GetExtState(EXT_SECTION, "color_bg")
+  if bg_str and bg_str ~= "" then
+    local n = tonumber(bg_str)
+    if n then cfg.color_bg = n end
+  end
+
+  local fg_str = reaper.GetExtState(EXT_SECTION, "color_fg")
+  if fg_str and fg_str ~= "" then
+    local n = tonumber(fg_str)
+    if n then cfg.color_fg = n end
   end
 
   apply_key_margin(cfg)
@@ -479,6 +501,23 @@ function M.draw(ctx, cfg, take)
         end
       end
       reaper.ImGui_EndCombo(ctx)
+    end
+  end
+
+  if reaper.ImGui_CollapsingHeader(ctx, "Colors", nil) then
+    local bg_changed, new_bg = reaper.ImGui_ColorEdit4(ctx, "Background", cfg.color_bg)
+    if bg_changed then
+      cfg.color_bg = new_bg
+      changed = true
+    end
+    -- Single foreground color for everything else (noteheads, stems,
+    -- text, staff/tab lines) - see color_util.lua for how secondary/dimmed
+    -- elements (barlines, ties, labels) derive from just these two colors
+    -- rather than needing their own settings.
+    local fg_changed, new_fg = reaper.ImGui_ColorEdit4(ctx, "Foreground (text, staff, tab)", cfg.color_fg)
+    if fg_changed then
+      cfg.color_fg = new_fg
+      changed = true
     end
   end
 
