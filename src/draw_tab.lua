@@ -83,7 +83,7 @@ local DASH_WIDTH = 8 -- px, each duration dash's horizontal length
 local DASH_GAP = 3 -- px between stacked dashes
 local DASH_TOP_GAP = 2 -- px between the number's bottom edge and the first dash
 local REST_DOT_RADIUS = 4 -- px - bigger than a notehead-sized dot would be, matching "a big black dot"
-local TECHNIQUE_BELOW_GAP = 3 -- px between the last duration dash (or the number, if there are none) and its technique marker below
+local TECHNIQUE_BELOW_GAP = 7 -- px between the last duration dash's own bottom edge (or the number's, if there are none) and its technique marker below
 local LET_RING_GAP = 3 -- px between the fret number's edge and where the let-ring dashing starts
 local LET_RING_DASH_LEN = 4 -- px length of each dash
 local LET_RING_GAP_LEN = 3 -- px gap between dashes
@@ -246,7 +246,14 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
           local dashes_bottom_y = number_bottom_y
           if dash_count > 0 then
             draw_duration_dashes(draw_list, x, number_bottom_y, dash_count)
-            dashes_bottom_y = number_bottom_y + DASH_TOP_GAP + (dash_count - 1) * DASH_GAP
+            -- draw_duration_dashes' own formula for its LAST dash's y is
+            -- number_bottom_y + DASH_TOP_GAP + (dash_count - 1) * DASH_GAP -
+            -- that's the line's own drawn position (its vertical center,
+            -- give or take its 1px stroke), not a point below it. Half
+            -- DASH_GAP pushes past that into real clearance instead of
+            -- landing right on the last dash itself, which is what let the
+            -- technique glyph below visibly touch it at 2+ dashes.
+            dashes_bottom_y = number_bottom_y + DASH_TOP_GAP + (dash_count - 1) * DASH_GAP + DASH_GAP / 2
           end
           if note.technique then
             draw_technique_marker(ctx, draw_list, x, dashes_bottom_y, note.technique)
