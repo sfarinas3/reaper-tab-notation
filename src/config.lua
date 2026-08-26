@@ -70,6 +70,17 @@ M.color_fg = 0xFFFFFFFF
 -- no per-take save.
 M.show_note_names = false
 
+-- PDF export scale (pdf_export.lua/ui_chrome.lua's "Print / Export"
+-- section): "app pixel units" (the same units config.layout's constants
+-- use) -> PDF points, applied uniformly to every position, notehead
+-- radius, line thickness, and font size - so this single number trades
+-- off text/notehead size against how many measures fit per printed line
+-- (lower = smaller and denser, higher = larger and sparser). A global
+-- display preference like show_note_names above, not an instrument/
+-- tuning property, so it's only ever persisted via the global ExtState
+-- fallback, no per-take save.
+M.print_scale = 0.3
+
 -- Japanese-capable font draw_tab.lua's shamisen technique markers (real
 -- katakana, e.g. ハ for hajiki) are drawn with - see main.lua, which loads
 -- and attaches it once at startup. jp_font_file is tried first, as an

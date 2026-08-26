@@ -6,10 +6,12 @@
 -- own header for why reusing the real drawing code (rather than a
 -- separate PDF-specific renderer) is the whole point of this design.
 --
--- Page size/margins/scale are fixed constants for now (US Letter,
--- portrait, 0.5in margins) - easy to make user-configurable later if
--- that's ever wanted, not exposed yet to keep the first version's
--- surface area small.
+-- Page size/margins are fixed constants for now (US Letter, portrait,
+-- 0.5in margins) - easy to make user-configurable later if that's ever
+-- wanted, not exposed yet to keep the first version's surface area
+-- small. Scale (config.print_scale) IS user-configurable, via ui_chrome.
+-- lua's "Print / Export" section - see that field's own comment in
+-- config.lua for what it trades off.
 
 local pdf_writer = require('pdf_writer')
 local pdf_capture = require('pdf_capture')
@@ -25,23 +27,9 @@ local M = {}
 local PAGE_WIDTH_PT, PAGE_HEIGHT_PT = 612, 792 -- US Letter, portrait, points (72pt/in)
 local MARGIN_PT = 36 -- 0.5in on all sides
 
--- "app pixel units" (the same units config.layout's constants use) -> PDF
--- points. pdf_capture.lua applies this SAME factor uniformly to every x/y
--- position, line thickness, notehead radius, and font size - so lowering
--- it shrinks the whole page proportionally (more content fits per line/
--- page, at a uniformly smaller size) rather than distorting spacing
--- relative to note/text size. That uniform behavior is deliberate: an
--- earlier version of this file additionally compressed just the
--- horizontal note-spacing constants (to pack more measures per line
--- without shrinking noteheads/text) and it looked exactly like what it
--- was - notes smooshed together at their original size. This SCALE is
--- the only knob for "how much fits per page" now. 0.3 targets ~4
--- measures/line at typical note density - the cost is a typical 13-15px
--- UI font printing at roughly 4-4.5pt, on the small side even for a
--- printed page; if that reads as too small in practice, raise this
--- toward 0.4-0.5 (fewer measures/line, more legible text) rather than
--- reaching for the old horizontal-only trick.
-local SCALE = 0.3
+-- Fallback if cfg.print_scale is ever unset (shouldn't happen -
+-- config.lua defaults it - but M.export shouldn't crash over it).
+local DEFAULT_SCALE = 0.3
 
 -- Always black-on-white regardless of the live view's own color scheme
 -- (which defaults to white ink on a dark panel - printing that literally
@@ -99,8 +87,9 @@ function M.export(ctx, cfg, cached_render_model, cached_measure_ticks, cached_me
     return false, "Nothing to export - the current take has no notes."
   end
 
-  local printable_w = (PAGE_WIDTH_PT - 2 * MARGIN_PT) / SCALE
-  local printable_h = (PAGE_HEIGHT_PT - 2 * MARGIN_PT) / SCALE
+  local scale = cfg.print_scale or DEFAULT_SCALE
+  local printable_w = (PAGE_WIDTH_PT - 2 * MARGIN_PT) / scale
+  local printable_h = (PAGE_HEIGHT_PT - 2 * MARGIN_PT) / scale
   local max_width = math.max(printable_w - cfg.layout.right_margin, 50)
 
   local systems = layout_engine.wrap_into_systems(cached_render_model, cached_measure_ticks, max_width)
@@ -124,7 +113,7 @@ function M.export(ctx, cfg, cached_render_model, cached_measure_ticks, cached_me
   draw_notation.set_colors(PRINT_COLOR_FG, PRINT_COLOR_BG)
   draw_tab.set_colors(PRINT_COLOR_FG, PRINT_COLOR_BG)
 
-  pdf_capture.install(doc, SCALE, MARGIN_PT, PAGE_HEIGHT_PT, base_font_size, draw_tab.get_jp_font())
+  pdf_capture.install(doc, scale, MARGIN_PT, PAGE_HEIGHT_PT, base_font_size, draw_tab.get_jp_font())
 
   local ok, err = pcall(function()
     for _, page in ipairs(pages) do
