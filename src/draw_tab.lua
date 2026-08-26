@@ -262,9 +262,12 @@ end
 -- notation_model.detect_rests' leading-silence check, exactly like
 -- draw_notation.lua's own measure_ticks param; omit it and rests just
 -- won't account for silence before the first note.
+-- barline_x: optional - see draw_notation.lua's own matching param; only
+-- consulted as a fallback for positioning a whole-measure rest when
+-- render_model has no notes at all (a fully empty system).
 -- Returns (width, height) consumed, so the caller can reserve that much
 -- space in the window's layout (e.g. via ImGui_Dummy).
-function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
+function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks, barline_x)
   local n_strings = #config.tuning
   local line_height = config.layout.line_height
   local staff_height = (n_strings - 1) * line_height
@@ -444,7 +447,18 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
     local leading_tick = measure_ticks and measure_ticks[1]
     local rests = notation_model.detect_rests(render_model, leading_tick, measure_ticks)
     for _, rest in ipairs(rests) do
-      local x = origin_x + layout_engine.x_for_tick(render_model, rest.tick)
+      -- #render_model == 0 (a fully empty system) falls back to
+      -- barline_x-based positioning - see M.draw's own doc comment and
+      -- layout_engine.x_for_tick_from_boundaries' header.
+      local rest_local_x
+      if #render_model > 0 then
+        rest_local_x = layout_engine.x_for_tick(render_model, rest.tick)
+      elseif barline_x then
+        rest_local_x = layout_engine.x_for_tick_from_boundaries(measure_ticks, barline_x, rest.tick)
+      else
+        rest_local_x = layout_engine.x_for_tick(render_model, rest.tick)
+      end
+      local x = origin_x + rest_local_x
       reaper.ImGui_DrawList_AddCircleFilled(draw_list, x, rest_y, REST_DOT_RADIUS, COLOR_TEXT, 0)
       local dash_count = notation_model.duration_dash_count(rest.duration_ticks)
       if dash_count > 0 then

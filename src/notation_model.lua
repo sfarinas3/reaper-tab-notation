@@ -603,6 +603,12 @@ end
 -- piece (the last system) or just this system's own closing/next-
 -- system's-opening boundary (any earlier system) - as an implicit
 -- trailing "next event" position, checked once after the main loop.
+--
+-- Fully empty render_model: a stretch with NO notes anywhere in it at all
+-- (most often a whole system made entirely of empty measures) has no
+-- event to anchor the leading/pairwise/trailing checks against, so it
+-- rendered with no rests whatsoever - handled as its own early-return case
+-- using measure_ticks' full span.
 -- Returns a list of {tick, duration_ticks, whole_measure}.
 function M.detect_rests(render_model, leading_tick, measure_ticks)
   local rests = {}
@@ -645,6 +651,22 @@ function M.detect_rests(render_model, leading_tick, measure_ticks)
 
       seg_start = seg_end
     end
+  end
+
+  -- A stretch with literally NO notes anywhere in it (most often a whole
+  -- system entirely made of empty measures, e.g. a long silent passage
+  -- that landed in its own system by the width-based bin-packing in
+  -- layout_engine.wrap_into_systems) - the leading/pairwise/trailing
+  -- checks below all require at least one render_model event to anchor
+  -- against, so this rendered with NO rests at all otherwise, not even
+  -- the whole-measure shorthand for its empty bars. measure_ticks' own
+  -- full span (start of its first measure through the end of its last)
+  -- covers exactly the silence that needs filling here.
+  if #render_model == 0 then
+    if measure_ticks and #measure_ticks > 1 then
+      add_gap(measure_ticks[1], measure_ticks[#measure_ticks] - measure_ticks[1])
+    end
+    return rests
   end
 
   if leading_tick and #render_model > 0 then

@@ -344,6 +344,37 @@ function M.x_for_tick(render_model, tick)
   return last.x + (tick - last.tick) * rate
 end
 
+-- Pixel x for a tick, interpolated between two parallel ascending arrays
+-- (ticks, xs) rather than render_model's own note positions - for a
+-- system with NO notes at all (an empty-render_model stretch, e.g. a long
+-- silent passage that landed in its own system), M.x_for_tick has nothing
+-- to interpolate from and collapses every tick to the same fallback x, so
+-- notation_model.detect_rests' whole-measure rests for that system would
+-- all stack on top of one another instead of getting their own distinct
+-- position. A system's own `ticks`/`barline_x` (this function's intended
+-- inputs - see M.wrap_into_systems' return shape) already carry a correct
+-- position for every measure boundary regardless of whether that system
+-- has any notes, since they're computed from the FULL, unsliced
+-- render_model before wrapping. Assumes tick falls within
+-- [ticks[1], ticks[#ticks]] - true by construction for any rest tick
+-- detect_rests can produce from a given system's own measure_ticks, so no
+-- extrapolation-beyond-the-ends case is needed here.
+function M.x_for_tick_from_boundaries(ticks, xs, tick)
+  local n = #ticks
+  if n == 0 then return config.layout.left_margin end
+  if n == 1 or tick <= ticks[1] then return xs[1] end
+
+  for i = 1, n - 1 do
+    if tick >= ticks[i] and tick <= ticks[i + 1] then
+      if ticks[i + 1] == ticks[i] then return xs[i] end
+      local t = (tick - ticks[i]) / (ticks[i + 1] - ticks[i])
+      return xs[i] + t * (xs[i + 1] - xs[i])
+    end
+  end
+
+  return xs[n]
+end
+
 -- Re-chunks render_model (M.compute()'s single-line output) into
 -- multiple systems (wrapped lines), each fitting within max_width,
 -- breaking only at measure boundaries per measure_ticks

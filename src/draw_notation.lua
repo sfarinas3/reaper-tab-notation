@@ -552,7 +552,13 @@ end
 -- at this system's start (in addition to the clef, which is always
 -- drawn). Callers should pass it only for the piece's first system and
 -- any system/measure where the meter actually changes, not every system.
-function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_lookup, measure_ticks, time_sig)
+-- barline_x: optional - this system's own already-computed local barline
+-- positions (M.wrap_into_systems' return shape, parallel to measure_ticks)
+-- - only consulted as a fallback for positioning a whole-measure rest when
+-- render_model has no notes at all to interpolate from (see layout_engine.
+-- x_for_tick_from_boundaries); omit it and a fully-empty system's rests
+-- all collapse onto the same fallback x instead of spreading across it.
+function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_lookup, measure_ticks, time_sig, barline_x)
   local half_step = config.layout.notation_line_spacing / 2
   local radius = config.layout.notehead_radius
   local stem_length = config.layout.stem_length
@@ -1032,7 +1038,18 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
     return (ns and ns[1]) or "treble"
   end
   for _, rest in ipairs(rests) do
-    local x = origin_x + layout_engine.x_for_tick(render_model, rest.tick)
+    -- #render_model == 0 (a system with no notes at all) falls back to
+    -- barline_x-based positioning - see this function's own doc comment
+    -- and layout_engine.x_for_tick_from_boundaries' header.
+    local rest_local_x
+    if #render_model > 0 then
+      rest_local_x = layout_engine.x_for_tick(render_model, rest.tick)
+    elseif barline_x then
+      rest_local_x = layout_engine.x_for_tick_from_boundaries(measure_ticks, barline_x, rest.tick)
+    else
+      rest_local_x = layout_engine.x_for_tick(render_model, rest.tick)
+    end
+    local x = origin_x + rest_local_x
     local staff = staff_for_rest(rest.tick)
     local rest_y = y_at(middle_line_offset(staff))
     -- A whole-measure (silent-bar) rest always uses the whole-rest glyph,

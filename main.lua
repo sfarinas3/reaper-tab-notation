@@ -366,10 +366,10 @@ local function main()
     end
 
     local notation_width = draw_notation.draw(
-      ctx, draw_list, origin_x, middle_c_y, system.events, beat_ticks_lookup, system.ticks, time_sig)
+      ctx, draw_list, origin_x, middle_c_y, system.events, beat_ticks_lookup, system.ticks, time_sig, system.barline_x)
 
     local tab_origin_y = middle_c_y + notation_below + config.layout.staff_gap
-    local tab_width = draw_tab.draw(ctx, draw_list, origin_x, tab_origin_y, system.events, system.ticks)
+    local tab_width = draw_tab.draw(ctx, draw_list, origin_x, tab_origin_y, system.events, system.ticks, system.barline_x)
     note_editor.check_system(origin_x, tab_origin_y, system.events)
 
     -- Barlines span the full height (notation staff down through tab), a
