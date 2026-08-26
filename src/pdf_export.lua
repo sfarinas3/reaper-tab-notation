@@ -29,7 +29,7 @@ local MARGIN_PT = 36 -- 0.5in on all sides
 
 -- Fallback if cfg.print_scale is ever unset (shouldn't happen -
 -- config.lua defaults it - but M.export shouldn't crash over it).
-local DEFAULT_SCALE = 0.3
+local DEFAULT_SCALE = 0.4
 
 -- Always black-on-white regardless of the live view's own color scheme
 -- (which defaults to white ink on a dark panel - printing that literally

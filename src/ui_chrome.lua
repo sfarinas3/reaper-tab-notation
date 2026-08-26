@@ -246,7 +246,7 @@ function M.save_persisted(cfg)
   -- Same "global display preference, no per-take save" treatment as colors
   -- above - see config.lua's header.
   reaper.SetExtState(EXT_SECTION, "show_note_names", cfg.show_note_names and "1" or "0", true)
-  reaper.SetExtState(EXT_SECTION, "print_scale", tostring(cfg.print_scale or 0.3), true)
+  reaper.SetExtState(EXT_SECTION, "print_scale", tostring(cfg.print_scale or 0.4), true)
   -- Composer/arranger are the one "last used globally" convenience that
   -- makes sense for score-header info - see config.lua's header. title is
   -- piece-specific and deliberately has no global fallback, so it's saved
@@ -665,7 +665,7 @@ function M.draw(ctx, cfg, take, on_export)
     -- still a finite page) and caps at 1.0 (this app's own on-screen
     -- pixel size - going higher would only reproduce the original
     -- "prints out massive" problem this field exists to fix).
-    local rv_scale, new_scale = reaper.ImGui_SliderDouble(ctx, "Print Scale", cfg.print_scale or 0.3, 0.15, 1.0, "%.2f")
+    local rv_scale, new_scale = reaper.ImGui_SliderDouble(ctx, "Print Scale", cfg.print_scale or 0.4, 0.15, 1.0, "%.2f")
     if rv_scale then
       cfg.print_scale = new_scale
       M.save_persisted(cfg)

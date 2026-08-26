@@ -79,7 +79,7 @@ M.show_note_names = false
 -- display preference like show_note_names above, not an instrument/
 -- tuning property, so it's only ever persisted via the global ExtState
 -- fallback, no per-take save.
-M.print_scale = 0.3
+M.print_scale = 0.4
 
 -- Japanese-capable font draw_tab.lua's shamisen technique markers (real
 -- katakana, e.g. ハ for hajiki) are drawn with - see main.lua, which loads
