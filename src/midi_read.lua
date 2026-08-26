@@ -48,12 +48,21 @@ function M.get_active_take()
   return take
 end
 
--- Cheap per-tick fingerprint for change detection. notesonly=true so this
--- only changes when note data changes (not CC/other MIDI events). Returns
--- nil if take is nil or the call fails.
+-- Cheap per-tick fingerprint for change detection. notesonly=false so this
+-- also changes when a shamisen technique tag is set/cleared - those are
+-- written as a text/sysex "notation event" (see this file's header), not
+-- note data, so a notesonly=true hash never noticed them: tagging a
+-- technique would write successfully but never trigger the recompute that
+-- actually reads it back into the render model, making the tag invisible
+-- until some unrelated note edit happened to force a refresh. Also now
+-- picks up REAPER's own native notation events (fingerings etc.) and any
+-- CC/other MIDI changes, which is an acceptable, harmless trade for
+-- correctness here - recompute is cheap at this app's scale (see
+-- layout_engine.lua's header) even if it now fires a bit more often than
+-- strictly necessary. Returns nil if take is nil or the call fails.
 function M.get_notes_hash(take)
   if not take then return nil end
-  local ok, hash = reaper.MIDI_GetHash(take, true, "")
+  local ok, hash = reaper.MIDI_GetHash(take, false, "")
   if not ok then return nil end
   return hash
 end
