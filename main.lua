@@ -95,6 +95,17 @@ local TEMPO_LABEL_ABOVE_GAP = 28 -- px above the notation staff's top line where
 local TOP_MARGIN = 32 -- px reserved above the first system, so its tempo/measure-number labels don't clip against the window's top edge
 
 local ctx = reaper.ImGui_CreateContext(SCRIPT_TITLE)
+
+-- Needed for draw_tab.lua's shamisen technique markers (real katakana
+-- glyphs, e.g. ハ for hajiki) - ReaImGui's default font has no Japanese
+-- glyphs, so those would otherwise render as tofu boxes. Created/attached
+-- once here rather than per-frame since the font itself never changes;
+-- draw_tab.lua pushes/pops it only around the specific text it needs it
+-- for, leaving every other font in this script as-is.
+local jp_font = reaper.ImGui_CreateFont(config.jp_font_family)
+reaper.ImGui_Attach(ctx, jp_font)
+draw_tab.set_jp_font(jp_font)
+
 local last_hash = nil
 local last_take = nil
 local cached_render_model = nil

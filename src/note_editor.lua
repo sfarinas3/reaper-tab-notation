@@ -43,10 +43,10 @@ local POPUP_ID = "note_editor_popup"
 local UNDO_ALL = -1 -- Undo_EndBlock's extraflags: -1 = all undo-state flags, the standard idiom
 local NOTATION_EVT_TYPE = 15 -- REAPER's own "notation event" MIDI meta-event type
 
--- Numbered per the source list this was requested from - kept as the
--- on-staff marker too (draw_tab.lua draws the id, not an invented
--- abbreviation), so the numbering stays the shared reference between the
--- popup and the tab.
+-- Numbered per the source list this was requested from - the id is this
+-- popup's own selection key, and also what draw_tab.lua's TECHNIQUE_SYMBOLS
+-- indexes by to pick the real katakana glyph drawn on the tab staff, so
+-- the two never disagree about which id means which technique.
 local TECHNIQUES = {
   { id = 1, name = "Sukui" },
   { id = 2, name = "Hajiki" },

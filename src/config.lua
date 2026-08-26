@@ -47,6 +47,16 @@ M.key_count = 0
 M.color_bg = 0x1E1E1EFF
 M.color_fg = 0xFFFFFFFF
 
+-- Font family draw_tab.lua's shamisen technique markers (real katakana,
+-- e.g. ハ for hajiki) are drawn with - see main.lua, which creates and
+-- attaches it once at startup via ImGui_CreateFont/Attach. "Yu Gothic UI"
+-- ships with Windows 10/11 by default and covers basic Japanese, so this
+-- should render correctly with no extra install for most users; if it
+-- doesn't (a non-Windows host, or a stripped-down install missing it),
+-- swap in another installed Japanese-capable font name here - e.g.
+-- "MS Gothic" or "Meiryo UI" on Windows, "Hiragino Sans" on macOS.
+M.jp_font_family = "Yu Gothic UI"
+
 -- Hand-tuned cost weights for the fret-assignment DP (fret_heuristic.lua).
 -- No learned model at this scale - these are starting points, expected to
 -- be adjusted after eyeballing real test riffs (see plan's Phase 2

@@ -66,6 +66,16 @@ function M.set_colors(fg, bg)
   COLOR_TIE = COLOR_LINE
 end
 
+-- The Japanese-capable font technique markers draw with (see M.set_jp_font
+-- below) - nil until main.lua sets one, in which case markers silently
+-- fall back to whatever font is already active (tofu boxes rather than a
+-- crash, if the host system has no font by that name).
+local jp_font = nil
+
+function M.set_jp_font(font)
+  jp_font = font
+end
+
 local TAB_LABEL_X_OFFSET = 4 -- px right of the staff start where the "TAB" label sits
 local TAB_LABEL_LINE_HEIGHT = 12 -- px between the stacked T/A/B letters
 
@@ -73,7 +83,7 @@ local DASH_WIDTH = 8 -- px, each duration dash's horizontal length
 local DASH_GAP = 3 -- px between stacked dashes
 local DASH_TOP_GAP = 2 -- px between the number's bottom edge and the first dash
 local REST_DOT_RADIUS = 4 -- px - bigger than a notehead-sized dot would be, matching "a big black dot"
-local TECHNIQUE_TOP_GAP = 2 -- px between the number's top edge and its technique marker above it
+local TECHNIQUE_BELOW_GAP = 3 -- px between the last duration dash (or the number, if there are none) and its technique marker below
 local LET_RING_GAP = 3 -- px between the fret number's edge and where the let-ring dashing starts
 local LET_RING_DASH_LEN = 4 -- px length of each dash
 local LET_RING_GAP_LEN = 3 -- px gap between dashes
@@ -114,15 +124,40 @@ local function draw_duration_dashes(draw_list, x, number_bottom_y, count)
   end
 end
 
--- The technique's own numbered id (see note_editor.lua's TECHNIQUES),
--- drawn small just above the fret number - opposite side from the
--- duration dashes below it, so the two never collide. Plain text rather
--- than an invented per-technique glyph, same guaranteed-to-render
--- placeholder approach as everything else in this file.
-local function draw_technique_marker(ctx, draw_list, x, number_top_y, technique_id)
-  local text = tostring(technique_id)
+-- The real bunkafu katakana abbreviation for each technique (see
+-- note_editor.lua's TECHNIQUES for the id<->name mapping this indexes by),
+-- rather than an invented placeholder - sourced from jonkara.com's 文化譜
+-- chart (ハ/ウ/ス for hajiki/uchi/sukui, confirmed independently by
+-- shamisen-zentrale.de's own description of hajiki) plus suri's own
+-- two-character スリ; oshibachi/suberi (オシ) and keshi (ケ) follow the
+-- same "abbreviate to the technique's own leading kana" pattern the
+-- confirmed ones share, since neither source spelled those two out
+-- explicitly - worth double-checking against a print bunkafu score if this
+-- ever needs to be authoritative rather than merely readable.
+local TECHNIQUE_SYMBOLS = {
+  [1] = "ス",   -- Sukui
+  [2] = "ハ",   -- Hajiki
+  [3] = "ウ",   -- Uchi
+  [4] = "スリ", -- Suri
+  [5] = "オシ", -- Oshibachi/Suberi
+  [6] = "ケ",   -- Keshi
+}
+
+-- Drawn beneath the fret number, below its duration dashes (dashes_bottom_y
+-- is already past those, or just the number's own bottom edge if it has
+-- none) - the placement the user asked for, matching how a real bunkafu
+-- score stacks technique marks under the position/duration info rather
+-- than mixing them into one line. Needs a Japanese-capable font (M.set_jp_font)
+-- to render as real katakana instead of tofu boxes; falls back to whatever
+-- font is already active if none was set.
+local function draw_technique_marker(ctx, draw_list, x, dashes_bottom_y, technique_id)
+  local text = TECHNIQUE_SYMBOLS[technique_id]
+  if not text then return end
+  local size = reaper.ImGui_GetFontSize(ctx)
+  if jp_font then reaper.ImGui_PushFont(ctx, jp_font, size) end
   local w, h = reaper.ImGui_CalcTextSize(ctx, text)
-  reaper.ImGui_DrawList_AddText(draw_list, x - w / 2, number_top_y - TECHNIQUE_TOP_GAP - h, COLOR_TECHNIQUE, text)
+  reaper.ImGui_DrawList_AddText(draw_list, x - w / 2, dashes_bottom_y + TECHNIQUE_BELOW_GAP, COLOR_TECHNIQUE, text)
+  if jp_font then reaper.ImGui_PopFont(ctx) end
 end
 
 -- Label a note would render as - used both for measurement (before layout
@@ -206,12 +241,15 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
         label_end_x = x + w / 2
 
         if is_shamisen then
+          local number_bottom_y = y + h / 2
           local dash_count = notation_model.duration_dash_count(event.duration_ticks)
+          local dashes_bottom_y = number_bottom_y
           if dash_count > 0 then
-            draw_duration_dashes(draw_list, x, y + h / 2, dash_count)
+            draw_duration_dashes(draw_list, x, number_bottom_y, dash_count)
+            dashes_bottom_y = number_bottom_y + DASH_TOP_GAP + (dash_count - 1) * DASH_GAP
           end
           if note.technique then
-            draw_technique_marker(ctx, draw_list, x, y - h / 2, note.technique)
+            draw_technique_marker(ctx, draw_list, x, dashes_bottom_y, note.technique)
           end
         end
       end
