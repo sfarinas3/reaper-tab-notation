@@ -147,6 +147,24 @@ function M.written_pitch(midi_pitch)
   return midi_pitch + 12
 end
 
+local SIMPLE_NOTE_NAMES = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }
+
+-- Plain sharps-only "C4"/"F#3"/"B1" note name for a raw MIDI pitch -
+-- standard scientific pitch notation (middle C = C4, MIDI 60). NOT
+-- key-signature-aware (contrast M.diatonic_position, which spells
+-- according to the current key for staff placement/accidentals - a
+-- heavier-weight call that also needs a written, not sounding, pitch);
+-- this is deliberately the simpler, always-available spelling, shared by
+-- ui_chrome.lua's tuning-field display and the optional "show note names"
+-- cheat-sheet overlay (draw_tab.lua/draw_notation.lua) so every place in
+-- the app that just wants "what note is this" agrees on the same string
+-- for the same pitch.
+function M.pitch_to_name(pitch)
+  local pitch_class = pitch % 12
+  local octave = math.floor(pitch / 12) - 1
+  return SIMPLE_NOTE_NAMES[pitch_class + 1] .. octave
+end
+
 -- Single integer diatonic position: increases by exactly 1 per natural
 -- letter name regardless of octave/accidental, so any two positions are
 -- directly comparable as staff-steps. Second return value: the accidental

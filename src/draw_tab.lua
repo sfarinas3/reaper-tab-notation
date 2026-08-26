@@ -86,6 +86,15 @@
 -- correction remains available via note_editor.lua's technique popup for
 -- Shamisen today (a guitar-specific manual override is a natural
 -- follow-up, not yet built).
+--
+-- "Show Note Names" cheat sheet (config.show_note_names, ui_chrome.lua's
+-- checkbox): prints each real note's plain sharps-only name (notation_
+-- model.pitch_to_name, e.g. "E1") immediately to the right of its own
+-- label - after any parenthesized tie-number, and pushing label_end_x
+-- (already used to anchor let-ring dashing) past it so the two never
+-- overlap. Applies to every instrument, not just guitar - unlike the
+-- velocity-based techniques above, this is direct MIDI data (the note's
+-- own pitch), not a heuristic guess.
 
 local config = require('config')
 local notation_model = require('notation_model')
@@ -104,6 +113,7 @@ local COLOR_TEXT = 0xFFFFFFFF
 local COLOR_TIE = 0xC0C0C0FF
 local COLOR_UNREACHABLE = 0xFF4040FF
 local COLOR_TECHNIQUE = 0xFFC040FF
+local COLOR_NOTE_NAME = 0x60C0FFFF -- fixed accent (like COLOR_TECHNIQUE/COLOR_UNREACHABLE) for the "Show Note Names" cheat sheet
 
 function M.set_colors(fg, bg)
   COLOR_TEXT = fg
@@ -137,6 +147,7 @@ local PALM_MUTE_VELOCITY_MAX = 63 -- MIDI velocities 1-63 auto-detect as palm-mu
 local PINCH_HARMONIC_VELOCITY = 127 -- the MIDI maximum auto-detects as a pinch harmonic (guitar only)
 local PM_BELOW_GAP = 7 -- px between the fret number's own bottom edge and the "P.M." label/dashes below it
 local PH_ABOVE_GAP = 4 -- px between the "P.H." label and the fret number's own top edge above it
+local NOTE_NAME_GAP = 4 -- px between a label's own right edge and its "Show Note Names" cheat-sheet text
 
 -- "Let ring" marking: a dashed horizontal line from a note's own position
 -- out to where its actual MIDI sustain (endppq) really ends - see this
@@ -298,6 +309,17 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
       local color = note.string and COLOR_TEXT or COLOR_UNREACHABLE
       reaper.ImGui_DrawList_AddText(draw_list, x - w / 2, y - h / 2, color, label)
       local label_end_x = x + w / 2
+
+      -- "Show Note Names" cheat sheet (config.show_note_names) - see this
+      -- file's header. Extends label_end_x past its own text so let-ring
+      -- dashing (further down) starts after the name instead of drawing
+      -- through it.
+      if config.show_note_names and note.string then
+        local name = notation_model.pitch_to_name(note.pitch)
+        local nw, nh = reaper.ImGui_CalcTextSize(ctx, name)
+        reaper.ImGui_DrawList_AddText(draw_list, label_end_x + NOTE_NAME_GAP, y - nh / 2, COLOR_NOTE_NAME, name)
+        label_end_x = label_end_x + NOTE_NAME_GAP + nw
+      end
 
       if note.string and note.tied_from_prev and last_x_by_string[note.string] then
         -- Same-system tie: arcs from the previous note's own position to

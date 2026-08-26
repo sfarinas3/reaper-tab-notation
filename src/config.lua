@@ -62,6 +62,14 @@ M.arranger = ""
 M.color_bg = 0x1E1E1EFF
 M.color_fg = 0xFFFFFFFF
 
+-- "Show Note Names" cheat-sheet toggle (ui_chrome.lua) - when on, draw_tab.
+-- lua/draw_notation.lua print each real note's plain sharps-only name (see
+-- notation_model.pitch_to_name) beside its fret number/notehead. A global
+-- display preference like the colors above, not an instrument/tuning
+-- property, so it's only ever persisted via the global ExtState fallback,
+-- no per-take save.
+M.show_note_names = false
+
 -- Japanese-capable font draw_tab.lua's shamisen technique markers (real
 -- katakana, e.g. ハ for hajiki) are drawn with - see main.lua, which loads
 -- and attaches it once at startup. jp_font_file is tried first, as an

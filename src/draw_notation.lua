@@ -122,6 +122,7 @@ local M = {}
 local COLOR_LINE = 0x808080FF
 local COLOR_NOTE = 0xFFFFFFFF
 local COLOR_LET_RING = 0xC0C0C0FF
+local COLOR_NOTE_NAME = 0x60C0FFFF -- fixed accent (not user-colorable) for the "Show Note Names" cheat sheet - matches draw_tab.lua's own constant
 
 function M.set_colors(fg, bg)
   COLOR_NOTE = fg
@@ -150,6 +151,7 @@ local TIE_STUB_REACH = 16 -- px a system-crossing tie's incoming half reaches ba
 local REST_RECT_W, REST_RECT_H = 8, 4 -- whole/half rest rectangle size
 local DOT_RADIUS = 1.5 -- px, an augmentation dot (dotted note/rest)
 local DOT_GAP = 4 -- px between a notehead/rest glyph's own right edge and its dot
+local NOTE_NAME_GAP = 4 -- px between a note's rightmost drawn edge (notehead, or its dot if dotted) and its "Show Note Names" cheat-sheet text
 local BRACE_X_OFFSET = 6 -- px left of the staff lines' start where the brace sits
 local BRACE_BULGE = 8 -- px further left the brace bulges at its midpoint
 local CLEF_X_OFFSET = 4 -- px right of the staff start where the clef sits
@@ -869,8 +871,32 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
       -- (whose duration_ticks is a meaningless tiny value - see layout_
       -- engine.lua's is_grace header) never get one; a grace note has no
       -- augmentable rhythmic value to begin with.
-      if not event.is_grace and notation_model.is_dotted_duration(event.duration_ticks) then
+      local is_dotted = not event.is_grace and notation_model.is_dotted_duration(event.duration_ticks)
+      if is_dotted then
         reaper.ImGui_DrawList_AddCircleFilled(draw_list, actual_x + note_radius + DOT_GAP, y, DOT_RADIUS, COLOR_NOTE, 0)
+      end
+
+      -- Rightmost edge of whatever's already drawn at this note's own x
+      -- (the notehead, plus its augmentation dot if any) - both the
+      -- optional note-name cheat sheet below and the let-ring dashing
+      -- further down anchor off this instead of a bare notehead-radius
+      -- offset, so neither one draws on top of the dot.
+      local right_edge_x = actual_x + note_radius
+      if is_dotted then
+        right_edge_x = right_edge_x + DOT_GAP + DOT_RADIUS * 2
+      end
+
+      -- "Show Note Names" cheat sheet (config.show_note_names, ui_chrome.
+      -- lua's checkbox): the note's plain sharps-only name (notation_
+      -- model.pitch_to_name, e.g. "E1") just right of its notehead/dot.
+      -- Skipped for X-notehead notes (note.string == nil) - those aren't a
+      -- real playable pitch to name. Pushes right_edge_x past the name so
+      -- let-ring (below) doesn't draw through it.
+      if config.show_note_names and note.string then
+        local name = notation_model.pitch_to_name(note.pitch)
+        local nw, nh = reaper.ImGui_CalcTextSize(ctx, name)
+        reaper.ImGui_DrawList_AddText(draw_list, right_edge_x + NOTE_NAME_GAP, y - nh / 2, COLOR_NOTE_NAME, name)
+        right_edge_x = right_edge_x + NOTE_NAME_GAP + nw
       end
 
       -- Let ring: this note's actual MIDI sustain outlasts its own
@@ -896,7 +922,7 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
       if note.string and note.endppq and not note.tied_to_next
           and render_model[i + 1] and note.endppq > render_model[i + 1].tick then
         local ring_end_x = origin_x + layout_engine.x_for_tick(render_model, note.endppq)
-        draw_let_ring_line(draw_list, actual_x + note_radius + LET_RING_GAP, ring_end_x, y, COLOR_LET_RING)
+        draw_let_ring_line(draw_list, right_edge_x + LET_RING_GAP, ring_end_x, y, COLOR_LET_RING)
       end
 
       if note.tied_from_prev and note.string and last_notehead_by_string[note.string] then

@@ -61,7 +61,6 @@ local MIN_STRINGS, MAX_STRINGS = 1, 9
 local MAX_CAPO = 12
 local MIN_MAX_FRET, MAX_MAX_FRET = 4, 24
 
-local NOTE_NAMES = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }
 local LETTER_SEMITONE = { C = 0, D = 2, E = 4, F = 5, G = 7, A = 9, B = 11 }
 
 -- Standard tunings per string count, high string first (config.tuning's
@@ -151,10 +150,14 @@ function M.instrument_summary(cfg)
   return title, "Tuning: " .. table.concat(parts, " ")
 end
 
+-- Delegates to notation_model.pitch_to_name (moved there so draw_tab.lua/
+-- draw_notation.lua can share the exact same spelling for the "show note
+-- names" cheat-sheet overlay without requiring ui_chrome.lua themselves -
+-- ui_chrome.lua already requires draw_notation.lua, so the reverse would
+-- be a circular require). Kept as its own function here since note_editor.
+-- lua and this file's own tuning-field code already call it by this name.
 function M.pitch_to_name(pitch)
-  local pitch_class = pitch % 12
-  local octave = math.floor(pitch / 12) - 1
-  return NOTE_NAMES[pitch_class + 1] .. octave
+  return notation_model.pitch_to_name(pitch)
 end
 
 -- "E2", "f#1", " C#-1 " -> MIDI pitch, or nil if it doesn't parse (e.g.
@@ -240,6 +243,9 @@ function M.save_persisted(cfg)
   -- there's no save_for_take counterpart for them.
   reaper.SetExtState(EXT_SECTION, "color_bg", tostring(cfg.color_bg), true)
   reaper.SetExtState(EXT_SECTION, "color_fg", tostring(cfg.color_fg), true)
+  -- Same "global display preference, no per-take save" treatment as colors
+  -- above - see config.lua's header.
+  reaper.SetExtState(EXT_SECTION, "show_note_names", cfg.show_note_names and "1" or "0", true)
   -- Composer/arranger are the one "last used globally" convenience that
   -- makes sense for score-header info - see config.lua's header. title is
   -- piece-specific and deliberately has no global fallback, so it's saved
@@ -298,6 +304,11 @@ function M.load_persisted(cfg)
   if fg_str and fg_str ~= "" then
     local n = tonumber(fg_str)
     if n then cfg.color_fg = n end
+  end
+
+  local show_names_str = reaper.GetExtState(EXT_SECTION, "show_note_names")
+  if show_names_str ~= "" then
+    cfg.show_note_names = (show_names_str == "1")
   end
 
   local composer_str = reaper.GetExtState(EXT_SECTION, "composer")
@@ -596,6 +607,16 @@ function M.draw(ctx, cfg, take)
       cfg.color_fg = new_fg
       changed = true
     end
+  end
+
+  -- Always visible (not tucked in a collapsible section) since it's a
+  -- quick view toggle a user flips on and off often, not a one-time
+  -- setup field - see config.lua's header for why it's a plain global
+  -- preference like Colors, with no per-take save of its own.
+  local nn_changed, new_show_note_names = reaper.ImGui_Checkbox(ctx, "Show Note Names", cfg.show_note_names or false)
+  if nn_changed then
+    cfg.show_note_names = new_show_note_names
+    changed = true
   end
 
   reaper.ImGui_Separator(ctx)
