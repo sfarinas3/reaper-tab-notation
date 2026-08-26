@@ -98,11 +98,33 @@ local ctx = reaper.ImGui_CreateContext(SCRIPT_TITLE)
 
 -- Needed for draw_tab.lua's shamisen technique markers (real katakana
 -- glyphs, e.g. ハ for hajiki) - ReaImGui's default font has no Japanese
--- glyphs, so those would otherwise render as tofu boxes. Created/attached
--- once here rather than per-frame since the font itself never changes;
+-- glyphs, so those would otherwise render as blank/missing. Loaded from an
+-- actual font FILE (config.jp_font_file - msgothic.ttc, bundled with every
+-- Windows install since Vista regardless of display language, not gated
+-- behind a Japanese language pack) rather than matched by family name:
+-- CreateFont's family-name lookup turned out not to resolve reliably
+-- (nothing rendered, not even a tofu box - the by-name attempt this
+-- replaced), whereas a direct file path is unambiguous. Falls back to the
+-- old by-name approach (config.jp_font_family) if that exact file isn't
+-- present, e.g. on a non-Windows REAPER install. Created/attached once
+-- here rather than per-frame since the font itself never changes;
 -- draw_tab.lua pushes/pops it only around the specific text it needs it
 -- for, leaving every other font in this script as-is.
-local jp_font = reaper.ImGui_CreateFont(config.jp_font_family)
+local function create_jp_font()
+  local f = io.open(config.jp_font_file, 'rb')
+  if f then
+    f:close()
+    -- index 0: the file's first face. msgothic.ttc bundles MS Gothic/MS
+    -- PGothic/MS UI Gothic as separate faces at different indices (the
+    -- exact order isn't guaranteed across Windows versions) - all three
+    -- cover the same katakana glyphs this needs, just with different
+    -- width metrics, so whichever one index 0 resolves to is fine here.
+    return reaper.ImGui_CreateFontFromFile(config.jp_font_file, 0)
+  end
+  return reaper.ImGui_CreateFont(config.jp_font_family)
+end
+
+local jp_font = create_jp_font()
 reaper.ImGui_Attach(ctx, jp_font)
 draw_tab.set_jp_font(jp_font)
 

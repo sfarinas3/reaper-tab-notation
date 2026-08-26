@@ -47,15 +47,18 @@ M.key_count = 0
 M.color_bg = 0x1E1E1EFF
 M.color_fg = 0xFFFFFFFF
 
--- Font family draw_tab.lua's shamisen technique markers (real katakana,
--- e.g. ハ for hajiki) are drawn with - see main.lua, which creates and
--- attaches it once at startup via ImGui_CreateFont/Attach. "Yu Gothic UI"
--- ships with Windows 10/11 by default and covers basic Japanese, so this
--- should render correctly with no extra install for most users; if it
--- doesn't (a non-Windows host, or a stripped-down install missing it),
--- swap in another installed Japanese-capable font name here - e.g.
--- "MS Gothic" or "Meiryo UI" on Windows, "Hiragino Sans" on macOS.
-M.jp_font_family = "Yu Gothic UI"
+-- Japanese-capable font draw_tab.lua's shamisen technique markers (real
+-- katakana, e.g. ハ for hajiki) are drawn with - see main.lua, which loads
+-- and attaches it once at startup. jp_font_file is tried first, as an
+-- exact file path (msgothic.ttc ships with every Windows install since
+-- Vista, regardless of display language); jp_font_family is the fallback
+-- if that file isn't found (e.g. a non-Windows REAPER install) - a
+-- by-name lookup, which turned out not to reliably resolve to a font with
+-- Japanese glyphs on its own. Change jp_font_file to another font file's
+-- full path (e.g. a Noto Sans JP .ttf) if msgothic.ttc ever isn't
+-- available on the target machine.
+M.jp_font_file = "C:\\Windows\\Fonts\\msgothic.ttc"
+M.jp_font_family = "MS Gothic"
 
 -- Hand-tuned cost weights for the fret-assignment DP (fret_heuristic.lua).
 -- No learned model at this scale - these are starting points, expected to
