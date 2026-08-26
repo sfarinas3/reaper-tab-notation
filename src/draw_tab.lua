@@ -87,6 +87,7 @@ local TECHNIQUE_BELOW_GAP = 7 -- px between the last duration dash's own bottom 
 local LET_RING_GAP = 3 -- px between the fret number's edge and where the let-ring dashing starts
 local LET_RING_DASH_LEN = 4 -- px length of each dash
 local LET_RING_GAP_LEN = 3 -- px gap between dashes
+local TIE_STUB_REACH = 16 -- px a system-crossing tie's incoming half reaches back from where it ends (mirrors draw_notation.lua's own constant)
 
 -- "Let ring" marking: a dashed horizontal line from a note's own position
 -- out to where its actual MIDI sustain (endppq) really ends - see this
@@ -239,6 +240,26 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
         local color = note.string and COLOR_TEXT or COLOR_UNREACHABLE
         reaper.ImGui_DrawList_AddText(draw_list, x - w / 2, y - h / 2, color, label)
         label_end_x = x + w / 2
+
+        -- Incoming half of a tie crossing a system break (mirrors
+        -- draw_notation.lua's own tied_from_prev/i==1 branch - see its
+        -- comment for the full reasoning: M.draw is called once per
+        -- system with fresh local state, so a tie continuing from the
+        -- PREVIOUS system's last note has no local predecessor here,
+        -- which is exactly why this fell into the label branch instead of
+        -- the tie-arc one above). Ends just left of the repeated number
+        -- rather than at its own center, so the two don't overlap -
+        -- showing both together (number + incoming stub) is itself a
+        -- legitimate, common real tab convention for a line-break
+        -- continuation, clearer here than an arc alone since tab relies
+        -- on explicit numbers rather than notehead position.
+        if note.string and note.tied_from_prev and i == 1 then
+          local stub_end_x = x - w / 2 - LET_RING_GAP
+          local stub_x = stub_end_x - TIE_STUB_REACH
+          local arc_y = y - line_height * 0.4
+          reaper.ImGui_DrawList_AddBezierCubic(
+            draw_list, stub_x, arc_y, stub_x, arc_y, stub_end_x, arc_y, stub_end_x, y, COLOR_TIE, 1.5, 0)
+        end
 
         if is_shamisen then
           local number_bottom_y = y + h / 2

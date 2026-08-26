@@ -144,6 +144,7 @@ local LET_RING_GAP_LEN = 3 -- px gap between dashes
 local LEDGER_OVERHANG = 3 -- px a ledger line extends past the notehead on each side
 local ACCIDENTAL_GAP = 3 -- px between an accidental symbol and the notehead it applies to
 local TIE_ARC_HEIGHT = 6 -- px the tie curve rises above the notes it connects
+local TIE_STUB_REACH = 16 -- px a system-crossing tie's incoming half reaches back from its note, into the header's own clear space before the first note
 local REST_RECT_W, REST_RECT_H = 8, 4 -- whole/half rest rectangle size
 local DOT_RADIUS = 1.5 -- px, an augmentation dot (dotted note/rest)
 local DOT_GAP = 4 -- px between a notehead/rest glyph's own right edge and its dot
@@ -804,27 +805,45 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
         end
         reaper.ImGui_DrawList_AddBezierCubic(
           draw_list, prev.x, prev.y, prev.x, arc_y, actual_x, arc_y, actual_x, y, COLOR_NOTE, 1.5, 0)
+      elseif note.tied_from_prev and note.string and i == 1 then
+        -- Incoming half of a tie crossing a system break - the previous
+        -- system's own last note already drew the outgoing hanging half
+        -- (below); this is its match on THIS system's first note. Without
+        -- it, a system-crossing tie only ever showed a curve trailing off
+        -- the edge of the previous line with nothing at all leading into
+        -- the continuation note here, which read as a fresh, unrelated
+        -- attack rather than a continued pitch. Only i == 1 can ever hit
+        -- this branch at all (last_notehead_by_string above is only ever
+        -- empty on a system's very first event), and only when
+        -- tied_from_prev is true, which the very first note of the whole
+        -- piece can never be - so this never fires except on a genuine
+        -- cross-system tie.
+        local stem_down = y <= y_at(middle_line_offset(staff))
+        local arc_y = stem_down and (y - TIE_ARC_HEIGHT) or (y + TIE_ARC_HEIGHT)
+        local stub_x = actual_x - TIE_STUB_REACH
+        reaper.ImGui_DrawList_AddBezierCubic(
+          draw_list, stub_x, arc_y, stub_x, arc_y, actual_x, arc_y, actual_x, y, COLOR_NOTE, 1.5, 0)
       end
       if note.string then
         last_notehead_by_string[note.string] = { x = actual_x, y = y }
         last_staff_by_string[note.string] = staff
       end
 
-      -- Hanging tie: this is the LAST note of the current system, and it
-      -- continues into the next one (tied_to_next, from layout_engine.
-      -- compute's barline-crossing split - see its header - landing on a
-      -- measure boundary that also happens to be a system-wrap point).
-      -- M.draw is called once per system with fresh local state (see
-      -- last_notehead_by_string above), so it has no visibility into the
-      -- next system's notes at all - the normal tie arc, which needs BOTH
-      -- endpoints, simply can't run there, and a matching "incoming" mark
-      -- at the START of the next system would need the SAME missing
-      -- information in reverse. Standard notation practice for a tie
-      -- crossing a line break: draw the curve rising off the last note and
-      -- continuing to the system's own right edge with no resolved
-      -- endpoint; the continuation note at the start of the next system
-      -- needs nothing extra beyond its own full notehead (already how
-      -- every tied note renders here regardless of system boundaries).
+      -- Hanging tie (outgoing half): this is the LAST note of the current
+      -- system, and it continues into the next one (tied_to_next, from
+      -- layout_engine.compute's barline-crossing split - see its header -
+      -- landing on a measure boundary that also happens to be a
+      -- system-wrap point). M.draw is called once per system with fresh
+      -- local state (see last_notehead_by_string above), so it has no
+      -- visibility into the next system's notes at all - the normal tie
+      -- arc, which needs BOTH endpoints, simply can't run there. Standard
+      -- notation practice for a tie crossing a line break: draw the curve
+      -- rising off the last note and continuing to the system's own right
+      -- edge with no resolved endpoint. The matching incoming half, on the
+      -- FIRST note of the next system, is the tied_from_prev/i==1 branch
+      -- above - drawn independently for the same reason (no shared state
+      -- across the two M.draw calls), not paired up as one continuous
+      -- curve.
       if note.tied_to_next and note.string and i == #render_model then
         local stem_down = y <= y_at(middle_line_offset(staff))
         local arc_y = stem_down and (y - TIE_ARC_HEIGHT) or (y + TIE_ARC_HEIGHT)
