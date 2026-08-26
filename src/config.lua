@@ -99,8 +99,17 @@ M.layout = {
   notation_line_spacing = 8, -- px between adjacent notation staff lines (half of this per diatonic step)
   notehead_radius = 3,
   stem_length = 24,
-  staff_gap = 18,         -- px gap between the notation staff and the tab staff below it
-  system_gap = 24,        -- px gap between one wrapped system's tab staff and the next system's notation staff
+  staff_gap = 26,         -- px gap between the notation staff and the tab staff below it
+  -- px gap between one wrapped system's tab staff and the next system's
+  -- notation staff. Has to clear more than just the tab lines themselves:
+  -- fret numbers/duration dashes/technique glyphs hang below the bottom
+  -- tab string (shamisen especially - a fret number plus dashes plus a
+  -- katakana technique marker is the tallest thing this app draws below a
+  -- staff), and the incoming system's own tempo/measure-number labels sit
+  -- above its notation staff (see main.lua's TEMPO_LABEL_ABOVE_GAP). Too
+  -- small a gap here means those two collide - the exact overlap this was
+  -- raised against.
+  system_gap = 64,
 
   -- Diatonic offset from middle C (0 = middle C itself) where X-notehead
   -- notes (outside the instrument's playable range - usually a mute or
