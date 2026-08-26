@@ -66,6 +66,13 @@
 -- only; composer/arranger also fall back to a global "last used" value,
 -- same convenience instrument/tuning already have (see config.lua/
 -- ui_chrome.lua headers).
+--
+-- The header/per-system drawing this file does each frame (score_render.
+-- lua) is shared verbatim with pdf_export.lua's "Export to PDF" pass
+-- (ui_chrome.lua's Print/Export section) - see those two files' own
+-- headers for how a real vector PDF gets produced by temporarily
+-- redirecting the exact same ImGui draw calls into a PDF file instead of
+-- the screen, rather than a second renderer that could drift out of sync.
 
 local SCRIPT_TITLE = "Guitar Tab/Notation Viewer"
 
@@ -87,9 +94,11 @@ local layout_engine = require('layout_engine')
 local notation_model = require('notation_model')
 local draw_tab = require('draw_tab')
 local draw_notation = require('draw_notation')
+local score_render = require('score_render')
 local ui_chrome = require('ui_chrome')
 local note_editor = require('note_editor')
 local color_util = require('color_util')
+local pdf_export = require('pdf_export')
 
 ui_chrome.load_persisted(config)
 
@@ -97,25 +106,12 @@ ui_chrome.load_persisted(config)
 -- user-configurable background/foreground palette (config.color_bg/
 -- color_fg, ui_chrome.lua's "Colors" section). Barline/label colors are
 -- computed fresh each frame from that palette instead (see main(), below),
--- since they can change at runtime.
+-- since they can change at runtime. Barline/header/label layout constants
+-- now live in score_render.lua, shared with pdf_export.lua's print pass.
 local COLOR_PLAYHEAD = 0xFF6020FF
 local MIN_SYSTEM_WIDTH = 150 -- floor for a transiently tiny/collapsing window, so wrapping never degenerates
 local WINDOW_CHROME_RESERVE = 40 -- fixed estimate for window padding + a possible vertical scrollbar
-local BARLINE_NOTE_GAP = 14 -- px a barline is shifted left of its exact tick position, so it doesn't sit on top of the next measure's first note
-local FINAL_BARLINE_GAP = 3 -- px between the thin and thick strokes of the piece's closing barline (standard "final barline" convention)
-local FINAL_BARLINE_THICK_WIDTH = 3.0 -- px stroke weight of the final barline's thick stroke
 local BOTTOM_MARGIN = 10 -- px reserved below the last system, so the bottom tab string's fret-number text doesn't clip against the window's bottom edge
-local MEASURE_LABEL_ABOVE_GAP = 14 -- px above the notation staff's top line where the measure-number label sits
-local TEMPO_LABEL_ABOVE_GAP = 28 -- px above the notation staff's top line where the tempo label sits (above the measure-number label)
-local TOP_MARGIN = 32 -- px reserved above the first system, so its tempo/measure-number labels don't clip against the window's top edge
-
--- Score header (title/composer/arranger, config.lua's header) - drawn once
--- above the very first system, like a real printed score's title page.
--- Reserved space is entirely conditional (0 if none of these are set), so
--- an untouched take looks exactly like it did before this feature existed.
-local TITLE_FONT_SCALE = 1.8 -- relative to the panel's base text size
-local SCORE_INFO_LINE_GAP = 2 -- px between the stacked composer/arranger lines
-local SCORE_HEADER_BOTTOM_GAP = 16 -- px between the header block and the first system's own reserved area
 
 local ctx = reaper.ImGui_CreateContext(SCRIPT_TITLE)
 
@@ -177,6 +173,16 @@ local function on_exit()
   set_toolbar_state(0)
 end
 
+-- Closes over the module-level cached_render_model/cached_measure_ticks/
+-- cached_measure_info (reassigned each recompute inside main(), below -
+-- Lua upvalues always see the current value, not a snapshot from
+-- whenever this closure was created) and ctx, so ui_chrome.lua's Print/
+-- Export button can trigger a real export without that UI-only module
+-- needing to know anything about the render model or PDF writing itself.
+local function do_export(filepath)
+  return pdf_export.export(ctx, config, cached_render_model, cached_measure_ticks, cached_measure_info, filepath)
+end
+
 local function main()
   local take = midi_read.get_active_take()
   local hash = midi_read.get_notes_hash(take)
@@ -196,7 +202,7 @@ local function main()
   -- ui_chrome.draw's return is a second, explicit cache-invalidation
   -- signal alongside the note-hash check below - tuning/capo edits never
   -- touch the MIDI take, so the hash alone would never notice them.
-  local settings_changed = ui_chrome.draw(ctx, config, take)
+  local settings_changed = ui_chrome.draw(ctx, config, take, do_export)
 
   if hash ~= last_hash or settings_changed or take_settings_changed or pending_recompute then
     last_hash = hash
@@ -276,59 +282,15 @@ local function main()
   local max_width = math.max(window_w - WINDOW_CHROME_RESERVE - config.layout.right_margin, MIN_SYSTEM_WIDTH)
   local systems = layout_engine.wrap_into_systems(cached_render_model, cached_measure_ticks, max_width)
 
-  -- Score header (title/composer/arranger/tempo marking) - see config.lua's
-  -- header for why these are blank by default. header_height/top_reserve
-  -- have to be computed before the systems loop below, since every
-  -- system's own vertical position is shifted down to make room; the
-  -- actual header TEXT is drawn afterward (needs max_width, already
-  -- computed above, for centering/right-alignment - drawing before or
-  -- after the systems loop makes no visual difference, ReaImGui has no
-  -- z-ordering concern here since nothing overlaps).
-  local has_title = config.title and config.title ~= ""
-  local has_composer = config.composer and config.composer ~= ""
-  local has_arranger = config.arranger and config.arranger ~= ""
-
-  local base_font_size = reaper.ImGui_GetFontSize(ctx)
-  local header_height = 0
-  if has_title or has_composer or has_arranger then
-    local title_h = has_title and (base_font_size * TITLE_FONT_SCALE) or 0
-    local side_h = 0
-    if has_composer then
-      local _, h = reaper.ImGui_CalcTextSize(ctx, config.composer)
-      side_h = side_h + h
-    end
-    if has_arranger then
-      local _, h = reaper.ImGui_CalcTextSize(ctx, "arr. " .. config.arranger)
-      side_h = side_h + (has_composer and (h + SCORE_INFO_LINE_GAP) or h)
-    end
-    header_height = math.max(title_h, side_h) + SCORE_HEADER_BOTTOM_GAP
-  end
-  local top_reserve = TOP_MARGIN + header_height
-
-  if has_title then
-    local title_size = base_font_size * TITLE_FONT_SCALE
-    local scale = title_size / base_font_size
-    local w = reaper.ImGui_CalcTextSize(ctx, config.title)
-    local title_x = origin_x + (max_width - w * scale) / 2
-    reaper.ImGui_DrawList_AddTextEx(draw_list, nil, title_size, title_x, origin_y, config.color_fg, config.title)
-  end
-  do
-    local side_y = origin_y
-    if has_composer then
-      local w, h = reaper.ImGui_CalcTextSize(ctx, config.composer)
-      reaper.ImGui_DrawList_AddText(draw_list, origin_x + max_width - w, side_y, config.color_fg, config.composer)
-      side_y = side_y + h + SCORE_INFO_LINE_GAP
-    end
-    if has_arranger then
-      local arranger_text = "arr. " .. config.arranger
-      local w = reaper.ImGui_CalcTextSize(ctx, arranger_text)
-      reaper.ImGui_DrawList_AddText(draw_list, origin_x + max_width - w, side_y, color_dim, arranger_text)
-    end
-  end
-
-  local notation_above, notation_below = draw_notation.vertical_extents()
-  local tab_staff_height = (#config.tuning - 1) * config.layout.line_height
-  local system_pitch = notation_above + notation_below + config.layout.staff_gap + tab_staff_height + config.layout.system_gap
+  -- Score header (title/composer/arranger) and per-system vertical
+  -- geometry - shared with pdf_export.lua's print pass via score_render.
+  -- lua, see that file's header. geo.top_reserve has to be known before
+  -- the systems loop below (every system's own vertical position is
+  -- shifted down to make room); the header text itself is drawn after
+  -- (needs max_width, already computed above, for centering/right-
+  -- alignment - order makes no visual difference, nothing overlaps).
+  local geo = score_render.layout_geometry(ctx, config)
+  score_render.draw_header(ctx, draw_list, origin_x, origin_y, config, max_width, config.color_fg, color_dim)
 
   local play_state = reaper.GetPlayState()
   local is_playing = (play_state & 1) == 1
@@ -348,80 +310,18 @@ local function main()
 
   for s = 1, #systems do
     local system = systems[s]
-    local sys_top_local_y = top_reserve + (s - 1) * system_pitch
-    local sys_origin_y = origin_y + sys_top_local_y
-    local middle_c_y = sys_origin_y + notation_above
+    local sys_top_local_y = geo.top_reserve + (s - 1) * geo.system_pitch
 
-    -- Time signature shown at this system only if its first measure is
-    -- the very start of the piece, or the meter differs from the
-    -- previous measure - same "only at start/changes" rule as tempo
-    -- markings, not repeated on every system.
-    local first_idx = system.item_measure_start
-    local this_info, prev_info = cached_measure_info[first_idx], cached_measure_info[first_idx - 1]
-    local time_sig = nil
-    if this_info and (first_idx == 1 or not prev_info
-        or prev_info.timesig_num ~= this_info.timesig_num
-        or prev_info.timesig_denom ~= this_info.timesig_denom) then
-      time_sig = { num = this_info.timesig_num, denom = this_info.timesig_denom }
-    end
+    local notation_width, tab_width, bar_top, bar_bottom = score_render.draw_system(
+      ctx, draw_list, origin_x, origin_y, sys_top_local_y, config, geo,
+      system, s, #systems, cached_measure_info, beat_ticks_lookup, color_dim)
 
-    local notation_width = draw_notation.draw(
-      ctx, draw_list, origin_x, middle_c_y, system.events, beat_ticks_lookup, system.ticks, time_sig, system.barline_x)
-
-    local tab_origin_y = middle_c_y + notation_below + config.layout.staff_gap
-    local tab_width = draw_tab.draw(ctx, draw_list, origin_x, tab_origin_y, system.events, system.ticks, system.barline_x)
+    -- tab_origin_y recomputed here (not returned by draw_system) just for
+    -- note_editor.lua's own hit-testing, which is live-view-only - same
+    -- formula draw_system uses internally.
+    local middle_c_y = origin_y + sys_top_local_y + geo.notation_above
+    local tab_origin_y = middle_c_y + geo.notation_below + config.layout.staff_gap
     note_editor.check_system(origin_x, tab_origin_y, system.events)
-
-    -- Barlines span the full height (notation staff down through tab), a
-    -- single continuous line unifying the two - the standard look for a
-    -- combined tab/notation sheet, rather than separate barlines per staff.
-    -- Shifted left of the boundary's exact tick position (BARLINE_NOTE_GAP)
-    -- since that tick is usually shared with the next measure's first
-    -- note - drawn exactly on top of it otherwise, with no breathing room.
-    local bar_top, bar_bottom = sys_origin_y, tab_origin_y + tab_staff_height
-    for bi, local_x in ipairs(system.barline_x) do
-      local x = origin_x + local_x - BARLINE_NOTE_GAP
-      reaper.ImGui_DrawList_AddLine(draw_list, x, bar_top, x, bar_bottom, color_dim, 1.0)
-
-      -- Final barline: standard notation always closes the very last
-      -- measure of the whole piece with a thin+thick pair rather than the
-      -- plain single line every other barline uses - a real, once-live gap
-      -- since every barline rendered identically before this, giving no
-      -- visual cue at all that the piece had actually ended. Only the
-      -- LAST system's LAST barline entry qualifies (barline_x's own final
-      -- entry on every other system is just that system's closing
-      -- boundary, shared with the next system's opening one - not the
-      -- piece's true end).
-      if s == #systems and bi == #system.barline_x then
-        local thick_x = x + FINAL_BARLINE_GAP
-        reaper.ImGui_DrawList_AddLine(draw_list, thick_x, bar_top, thick_x, bar_bottom, color_dim, FINAL_BARLINE_THICK_WIDTH)
-      end
-    end
-
-    -- Measure numbers: item-relative (counted from this take's own start)
-    -- and REAPER's absolute project measure number, so you can cross-
-    -- reference a measure here against REAPER's ruler/grid even though
-    -- wrapping means our layout is no longer a single line matching it
-    -- 1:1. One label per measure that actually starts in this system -
-    -- ticks[#ticks] is only this system's closing boundary (shared with
-    -- the next system's opening one), so it's excluded here.
-    for j = 1, #system.ticks - 1 do
-      local global_idx = system.item_measure_start + j - 1
-      local item_measure = system.item_measure_start + (j - 1)
-      local measure_info = cached_measure_info[global_idx]
-      local label = string.format("%d (R%d)", item_measure, measure_info.reaper_measure)
-      local x = origin_x + system.barline_x[j] - BARLINE_NOTE_GAP
-      reaper.ImGui_DrawList_AddText(draw_list, x, bar_top - MEASURE_LABEL_ABOVE_GAP, color_dim, label)
-
-      -- Tempo marking: at the very first measure of the piece, and
-      -- wherever it changes from the previous measure - not on every
-      -- measure, which would just be clutter.
-      local prev_measure_info = cached_measure_info[global_idx - 1]
-      if global_idx == 1 or not prev_measure_info or prev_measure_info.tempo ~= measure_info.tempo then
-        local tempo_label = measure_info.tempo .. " BPM"
-        reaper.ImGui_DrawList_AddText(draw_list, x, bar_top - TEMPO_LABEL_ABOVE_GAP, color_dim, tempo_label)
-      end
-    end
 
     total_width = math.max(total_width, notation_width, tab_width)
 
@@ -434,7 +334,7 @@ local function main()
 
   pending_recompute = note_editor.end_frame(ctx, take)
 
-  local total_height = top_reserve + (#systems * system_pitch - config.layout.system_gap) + BOTTOM_MARGIN
+  local total_height = geo.top_reserve + (#systems * geo.system_pitch - config.layout.system_gap) + BOTTOM_MARGIN
 
   -- Auto-scroll during playback now follows vertically (which system is
   -- active), not horizontally - wrapping already keeps every system
@@ -446,9 +346,9 @@ local function main()
   -- note-by-note motion horizontal follow had.
   if playhead_system_top_y then
     local current_scroll_y = reaper.ImGui_GetScrollY(ctx)
-    local system_bottom_y = playhead_system_top_y + system_pitch
+    local system_bottom_y = playhead_system_top_y + geo.system_pitch
 
-    if system_pitch > avail_h then
+    if geo.system_pitch > avail_h then
       -- The system itself is taller than the visible area - trying to
       -- fit both its top and bottom on screen is impossible, and the two
       -- branches below would otherwise fight each other every frame

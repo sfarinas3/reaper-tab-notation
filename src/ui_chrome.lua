@@ -451,6 +451,32 @@ local function sync_buffers(tuning)
   end
 end
 
+-- Print/export path field state - a plain module-level buffer (not saved
+-- to cfg/ExtState, unlike everything else this file persists) since it's
+-- a one-shot destination for the NEXT export, not a setting worth
+-- remembering across sessions the way instrument/tuning/colors are.
+local export_path_buf = nil
+local export_status = nil -- { ok = bool, message = string } from the last export attempt, or nil before any attempt this session
+
+-- A best-effort starting point for the path field: the current project's
+-- own folder (reaper.GetProjectPath, pcall-guarded since this isn't a
+-- function this codebase has called before and it's not worth a hard
+-- failure if its exact signature ever differs) plus a filename derived
+-- from the score's own title, falling back to just the bare filename
+-- (relative to REAPER's own working directory) if the project path isn't
+-- available - e.g. an unsaved project.
+local function default_export_path(cfg)
+  local name = (cfg.title and cfg.title ~= "") and cfg.title or "tab"
+  name = name:gsub('[\\/:*?"<>|]', "_") -- strip characters a filename can't safely contain
+  local dir = ""
+  local ok, path = pcall(reaper.GetProjectPath)
+  if ok and path and path ~= "" then
+    local last = path:sub(-1)
+    dir = path .. ((last == "\\" or last == "/") and "" or "\\")
+  end
+  return dir .. name .. ".pdf"
+end
+
 -- Draws the settings panel: score header info (title/composer/arranger,
 -- see config.lua's header) in its own "Score Info" section, first since
 -- it's the score's own identity; then instrument
@@ -467,7 +493,14 @@ end
 -- take: the currently active take (may be nil, e.g. nothing selected) -
 -- used only to also save_for_take on a change, so this specific item
 -- remembers it; safe to pass nil, that save just no-ops.
-function M.draw(ctx, cfg, take)
+-- on_export: optional function(filepath) -> ok, message, called when the
+-- "Export to PDF" button (Print/Export section, below) is clicked -
+-- main.lua supplies this, closing over its own cached render model/ctx
+-- (pdf_export.lua's actual export function needs both, neither of which
+-- this UI-only module has any business knowing about). Omit it (or pass
+-- nil) and the section still draws but the button just does nothing -
+-- safe for any future caller that doesn't wire printing up yet.
+function M.draw(ctx, cfg, take, on_export)
   if not buffers_initialized then
     sync_buffers(cfg.tuning)
     buffers_initialized = true
@@ -606,6 +639,38 @@ function M.draw(ctx, cfg, take)
     if fg_changed then
       cfg.color_fg = new_fg
       changed = true
+    end
+  end
+
+  if reaper.ImGui_CollapsingHeader(ctx, "Print / Export", nil) then
+    if not export_path_buf then
+      export_path_buf = default_export_path(cfg)
+    end
+
+    local rv_path, new_path = reaper.ImGui_InputText(ctx, "Output Path", export_path_buf)
+    if rv_path then
+      export_path_buf = new_path
+    end
+
+    if reaper.ImGui_Button(ctx, "Export to PDF") then
+      local path = export_path_buf
+      if not path:lower():match("%.pdf$") then path = path .. ".pdf" end
+      if on_export then
+        local ok, message = on_export(path)
+        export_status = { ok = ok, message = message or (ok and ("Saved to " .. path) or "Export failed") }
+      else
+        export_status = { ok = false, message = "Printing isn't wired up." }
+      end
+    end
+
+    if export_status then
+      -- Fixed status colors (not this app's own foreground/background
+      -- palette) - a status message is chrome, not part of the printed
+      -- score itself, so it doesn't need to track the Colors section.
+      local status_color = export_status.ok and 0x60FF60FF or 0xFF6060FF
+      reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), status_color)
+      reaper.ImGui_TextWrapped(ctx, export_status.message)
+      reaper.ImGui_PopStyleColor(ctx)
     end
   end
 

@@ -131,6 +131,15 @@ function M.set_jp_font(font)
   jp_font = font
 end
 
+-- pdf_capture.lua needs this same font handle to recognize when a
+-- PushFont/PopFont pair is the katakana one (so it can skip drawing that
+-- text - no CJK glyphs in a base-14 PDF font, see pdf_capture.lua's
+-- header), without main.lua having to thread the handle through the
+-- export call chain separately from how it's already wired here.
+function M.get_jp_font()
+  return jp_font
+end
+
 local TAB_LABEL_X_OFFSET = 4 -- px right of the staff start where the "TAB" label sits
 local TAB_LABEL_LINE_HEIGHT = 12 -- px between the stacked T/A/B letters
 
