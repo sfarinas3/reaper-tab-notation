@@ -84,11 +84,15 @@ Source: "..\install_toolbar_button.lua"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\src\*.lua"; DestDir: "{app}\src"; Flags: ignoreversion recursesubdirs
 ; ReaImGui/ReaPack extensions - see this file's header for why these are
 ; bundled DLL drops into UserPlugins rather than a ReaPack-mediated
-; install. onlyifdoesntexist: never overwrite a copy the user (or
-; ReaPack) already has - a friend who's already set these up shouldn't
-; have their existing (possibly newer) version silently downgraded.
-Source: "..\vendor\reaper_imgui64.dll"; DestDir: "{app}\..\..\UserPlugins"; Flags: onlyifdoesntexist
-Source: "..\vendor\reaper_reapack64.dll"; DestDir: "{app}\..\..\UserPlugins"; Flags: onlyifdoesntexist
+; install. Filenames MUST stay exactly as the upstream release ships
+; them (see vendor\VERSIONS.txt) - ReaPack in particular self-checks its
+; own loaded filename against "reaper_reapack-x64.dll" and refuses to
+; load with a warning if it's been renamed. onlyifdoesntexist: never
+; overwrite a copy the user (or ReaPack) already has - a friend who's
+; already set these up shouldn't have their existing (possibly newer)
+; version silently downgraded.
+Source: "..\vendor\reaper_imgui-x64.dll"; DestDir: "{app}\..\..\UserPlugins"; Flags: onlyifdoesntexist
+Source: "..\vendor\reaper_reapack-x64.dll"; DestDir: "{app}\..\..\UserPlugins"; Flags: onlyifdoesntexist
 
 [Run]
 ; postinstall: shown as a checked-by-default checkbox on the finish page

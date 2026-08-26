@@ -15,19 +15,25 @@ folder `deploy.ps1` targets for local dev). It's a per-user install - no
 admin rights, no UAC prompt.
 
 It also installs ReaPack/ReaImGui (REAPER's own dependency) itself: pinned
-copies of `reaper_imgui64.dll` and `reaper_reapack64.dll` live in
+copies of `reaper_imgui-x64.dll` and `reaper_reapack-x64.dll` live in
 `vendor/` (see `vendor/VERSIONS.txt` for exactly which release each came
 from and how to update them) and get dropped straight into REAPER's
 `UserPlugins` folder, `onlyifdoesntexist` so an existing install is never
-silently downgraded. This works without ReaPack ever running: REAPER
-loads any DLL in `UserPlugins` exporting the right entry point regardless
-of filename or how it got there, and our script only actually needs the
-ReaImGui extension loaded - ReaPack itself was only ever the
-*conventional* way a user would get that DLL, not a hard dependency of
-a dependency. The DLLs are bundled (not fetched from GitHub live at
-install time) so a friend's install never depends on internet access or
-GitHub's release URLs staying put - the tradeoff is a pinned version that
-needs a manual bump in `vendor/` for updates, same as any bundled binary.
+silently downgraded, under their **exact original release filenames** -
+REAPER itself loads any DLL in `UserPlugins` exporting the right entry
+point regardless of filename, but ReaPack specifically does its own
+self-check at load time (comparing its loaded module path against
+`UserPlugins/reaper_reapack-<arch>.dll`) and refuses to load with a
+warning if it's been renamed, which an earlier version of this bundling
+hit by renaming both DLLs to a `*64.dll` convention - see
+`vendor/VERSIONS.txt`. This all works without ReaPack ever running to
+install anything itself - our script only actually needs the ReaImGui
+extension loaded, and ReaPack was only ever the *conventional* way a
+user would get that DLL, not a hard dependency of a dependency. The DLLs
+are bundled (not fetched from GitHub live at install time) so a friend's
+install never depends on internet access or GitHub's release URLs
+staying put - the tradeoff is a pinned version that needs a manual bump
+in `vendor/` for updates, same as any bundled binary.
 
 Registering the script as a REAPER action and adding its Main-toolbar
 button both require REAPER's own scripting API
