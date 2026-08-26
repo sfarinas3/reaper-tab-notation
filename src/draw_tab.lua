@@ -56,6 +56,36 @@
 -- note's own endppq outlasting the next event's start tick. See
 -- draw_notation.lua's matching header comment - both staves show this the
 -- same way.
+--
+-- Guitar-only auto-detected techniques (config.instrument == "Guitar"),
+-- inferred from a note's own recorded MIDI velocity rather than a manual
+-- tag (contrast note_editor.lua's technique popup, which is Shamisen-only
+-- and hand-selected per note) - a first pass at what the plan's own
+-- research flagged as guitar's biggest technique-marking gap. Only two so
+-- far, both keyed on a note's velocity as played/recorded:
+--   - Palm mute (velocity 1-63): standard tab convention marks a palm-
+--     muted passage with "P.M." at its start and a dashed line spanning
+--     the muted notes, drawn BELOW the fret numbers - see
+--     PALM_MUTE_VELOCITY_MAX and the per-string run tracking
+--     (pm_active_by_string/pm_last_muted_x) in M.draw, which mirrors how
+--     ties/let-ring already track continuity per string. A run only
+--     breaks on a same-string note that ISN'T in the muted velocity range
+--     (or the string simply stops being played) - it does NOT try to
+--     bridge across a different string, so a muted passage that hops
+--     strings gets one "P.M." label per string rather than one continuous
+--     bracket, the same kind of per-string simplification this file's tie
+--     handling already accepts.
+--   - Pinch harmonic (velocity 127, the MIDI maximum): marked "P.H."
+--     above the fret number - unlike palm muting this is a single-note
+--     technique, not a sustained passage, so it needs no run-tracking of
+--     its own.
+-- Both are heuristics, not a real signal REAPER stores anywhere - a
+-- performer/sequencer happening to use these exact velocity ranges for
+-- unrelated reasons would misfire; accepted since there's no dedicated
+-- MIDI channel for either technique to detect from instead, and manual
+-- correction remains available via note_editor.lua's technique popup for
+-- Shamisen today (a guitar-specific manual override is a natural
+-- follow-up, not yet built).
 
 local config = require('config')
 local notation_model = require('notation_model')
@@ -103,15 +133,22 @@ local LET_RING_GAP = 3 -- px between the fret number's edge and where the let-ri
 local LET_RING_DASH_LEN = 4 -- px length of each dash
 local LET_RING_GAP_LEN = 3 -- px gap between dashes
 local TIE_STUB_REACH = 16 -- px a system-crossing tie's incoming half reaches back from where it ends (mirrors draw_notation.lua's own constant)
+local PALM_MUTE_VELOCITY_MAX = 63 -- MIDI velocities 1-63 auto-detect as palm-muted (guitar only - see this file's header)
+local PINCH_HARMONIC_VELOCITY = 127 -- the MIDI maximum auto-detects as a pinch harmonic (guitar only)
+local PM_BELOW_GAP = 7 -- px between the fret number's own bottom edge and the "P.M." label/dashes below it
+local PH_ABOVE_GAP = 4 -- px between the "P.H." label and the fret number's own top edge above it
 
 -- "Let ring" marking: a dashed horizontal line from a note's own position
 -- out to where its actual MIDI sustain (endppq) really ends - see this
--- file's header for the detection rule and rationale.
-local function draw_let_ring_line(draw_list, x0, x1, y)
+-- file's header for the detection rule and rationale. Also reused for the
+-- palm-mute run's own connecting dashes (with a different color) - both
+-- are "a dashed line means this technique continues" markings, just at
+-- different vertical positions and for a different reason.
+local function draw_let_ring_line(draw_list, x0, x1, y, color)
   local x = x0
   while x < x1 do
     local seg_end = math.min(x + LET_RING_DASH_LEN, x1)
-    reaper.ImGui_DrawList_AddLine(draw_list, x, y, seg_end, y, COLOR_TIE, 1.5)
+    reaper.ImGui_DrawList_AddLine(draw_list, x, y, seg_end, y, color or COLOR_TIE, 1.5)
     x = x + LET_RING_DASH_LEN + LET_RING_GAP_LEN
   end
 end
@@ -235,7 +272,13 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
   draw_tab_label(ctx, draw_list, origin_x + TAB_LABEL_X_OFFSET, origin_y, staff_height)
 
   local is_shamisen = config.instrument == "Shamisen"
+  local is_guitar = config.instrument == "Guitar"
   local last_x_by_string = {}
+  -- Palm-mute run tracking, per string - mirrors last_x_by_string's own
+  -- per-string continuity model (see this file's header for why a run
+  -- doesn't try to bridge across a different string).
+  local pm_active_by_string = {}
+  local pm_last_muted_x = {}
 
   for i = 1, #render_model do
     local event = render_model[i]
@@ -301,6 +344,36 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
         end
         if note.technique then
           draw_technique_marker(ctx, draw_list, x, dashes_bottom_y, note.technique)
+        end
+      end
+
+      -- Guitar-only auto-detected techniques, from the note's own recorded
+      -- velocity - see this file's header for the full rationale and the
+      -- two velocity ranges. Pinch harmonic is a single-note marker (no
+      -- run-tracking needed); palm mute is a per-string run, continuing
+      -- the dashed line from the previous muted note on the SAME string
+      -- (pm_last_muted_x) or starting a fresh "P.M." label if this is the
+      -- first muted note since that string's last non-muted one.
+      if is_guitar and note.string then
+        if note.vel == PINCH_HARMONIC_VELOCITY then
+          local text = "P.H."
+          local tw, th = reaper.ImGui_CalcTextSize(ctx, text)
+          reaper.ImGui_DrawList_AddText(draw_list, x - tw / 2, y - h / 2 - PH_ABOVE_GAP - th, COLOR_TECHNIQUE, text)
+        end
+
+        if note.vel and note.vel >= 1 and note.vel <= PALM_MUTE_VELOCITY_MAX then
+          local pm_y = y + h / 2 + PM_BELOW_GAP
+          if pm_active_by_string[note.string] then
+            draw_let_ring_line(draw_list, pm_last_muted_x[note.string], x, pm_y, COLOR_TECHNIQUE)
+          else
+            local text = "P.M."
+            local tw, th = reaper.ImGui_CalcTextSize(ctx, text)
+            reaper.ImGui_DrawList_AddText(draw_list, x - tw / 2, pm_y - th / 2, COLOR_TECHNIQUE, text)
+          end
+          pm_active_by_string[note.string] = true
+          pm_last_muted_x[note.string] = x
+        else
+          pm_active_by_string[note.string] = false
         end
       end
 
