@@ -24,7 +24,16 @@ local M = {}
 
 local PAGE_WIDTH_PT, PAGE_HEIGHT_PT = 612, 792 -- US Letter, portrait, points (72pt/in)
 local MARGIN_PT = 36 -- 0.5in on all sides
-local SCALE = 1.5 -- "app pixel units" (the same units config.layout's constants use) -> PDF points
+-- "app pixel units" (the same units config.layout's constants use) -> PDF
+-- points. 0.75 = 72/96, the standard px->pt conversion at a 96 DPI
+-- reference (matching how config.layout's pixel constants read on a
+-- normal screen) - NOT 1x or higher: this app's staff/spacing constants
+-- are sized for a comfortably large on-screen panel, so printing them at
+-- 1:1 (let alone enlarged) blows a page up to ~1 giant system and forces
+-- absurd pagination. 0.75 keeps proportions faithful to the live view
+-- while fitting a normal few-systems-per-page, few-measures-per-line
+-- printed layout.
+local SCALE = 0.75
 
 -- Always black-on-white regardless of the live view's own color scheme
 -- (which defaults to white ink on a dark panel - printing that literally
