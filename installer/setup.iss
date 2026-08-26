@@ -1,13 +1,16 @@
 ; Inno Setup script for the Guitar Tab/Notation Viewer REAPER script.
 ;
-; What this does: copies main.lua + src/*.lua into the current Windows
-; user's REAPER Scripts folder (no admin rights needed - it's a per-user
-; AppData install, same folder deploy.ps1 already targets for local dev).
-; It does NOT install ReaPack/ReaImGui (REAPER's own dependency, and this
-; installer runs outside REAPER so it can't call REAPER's action-
-; registration API) and does NOT register the script as a REAPER action -
-; POST_INSTALL.txt (shown on the last wizard page) tells the user the one
-; manual step (Actions > Show Action List > New Action > Load ReaScript).
+; What this does: copies main.lua + install_toolbar_button.lua + src/*.lua
+; + assets/* into the current Windows user's REAPER Scripts folder (no
+; admin rights needed - it's a per-user AppData install, same folder
+; deploy.ps1 already targets for local dev). It does NOT install ReaPack/
+; ReaImGui (REAPER's own dependency, and this installer runs outside
+; REAPER so it can't call REAPER's action-registration API) and does NOT
+; register the script as a REAPER action or add its toolbar button -
+; POST_INSTALL.txt (shown on the last wizard page) tells the user the two
+; manual one-time steps (Load ReaScript for main.lua, then run
+; install_toolbar_button.lua once - see that file's own header for why
+; the toolbar button specifically can't be set up from here either).
 ; See ..\DISTRIBUTION.md for the full packaging writeup, including what's
 ; deliberately deferred (license-key gating, Lua bytecode precompilation)
 ; and how to add each without restructuring this script.
@@ -52,4 +55,6 @@ InfoAfterFile=POST_INSTALL.txt
 ; bytecode" section) - point Source at the .luac build output instead of
 ; the repo's .lua files, everything else in this script stays the same.
 Source: "..\main.lua"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\install_toolbar_button.lua"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\src\*.lua"; DestDir: "{app}\src"; Flags: ignoreversion recursesubdirs
+Source: "..\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs

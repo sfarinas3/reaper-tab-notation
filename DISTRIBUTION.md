@@ -9,7 +9,8 @@ does the file-copying REAPER itself requires.
 ## Current approach: Inno Setup installer
 
 `installer/setup.iss` builds a single `ReaperTabNotation-Setup.exe` that
-copies `main.lua` and `src/*.lua` into the current user's
+copies `main.lua`, `install_toolbar_button.lua`, `src/*.lua`, and
+`assets/*` into the current user's
 `%APPDATA%\REAPER\Scripts\reaper-tab-notation\` (the same folder
 `deploy.ps1` targets for local dev). It's a per-user install - no admin
 rights, no UAC prompt.
@@ -17,12 +18,17 @@ rights, no UAC prompt.
 It deliberately does NOT:
 - Install ReaPack/ReaImGui (REAPER's own dependency - `main.lua` already
   shows a clear message box on launch if ReaImGui isn't present).
-- Register the script as a REAPER action automatically. That requires
-  REAPER's own `reaper.AddRemoveReaScript` API, callable only from a
-  script already running inside REAPER - an installer `.exe` running
-  outside REAPER can't call it directly. The installer's finish page
-  (`installer/POST_INSTALL.txt`) instead tells the user the one manual
-  step: Actions > Show Action List > New Action > Load ReaScript.
+- Register the script as a REAPER action automatically, or add its
+  Main-toolbar button. Both require REAPER's own scripting API
+  (`reaper.AddRemoveReaScript`, and a read-modify-write of
+  `reaper-menu.ini` - see `install_toolbar_button.lua`'s own header),
+  callable only from a script already running inside REAPER - an
+  installer `.exe` running outside REAPER can't call it directly. The
+  installer's finish page (`installer/POST_INSTALL.txt`) instead tells
+  the user the two manual one-time steps: Load ReaScript for `main.lua`
+  (Actions > Show Action List > New Action > Load ReaScript), then run
+  `install_toolbar_button.lua` the same way once to get the toolbar
+  button.
 
 ### Building it
 
@@ -30,12 +36,13 @@ It deliberately does NOT:
 2. From the repo root: `ISCC installer\setup.iss`
 3. Output: `dist\ReaperTabNotation-Setup.exe` - this is the file to share.
 
-### A future improvement: one-click action registration
+### A future improvement: zero manual steps
 
-Could close the "one manual step" gap by having the installer launch
-REAPER with a tiny one-shot bootstrap ReaScript
+Could close the remaining "two manual steps" gap by having the installer
+launch REAPER with a tiny one-shot bootstrap ReaScript
 (`reaper.exe -nonewinst bootstrap.lua`) that calls `AddRemoveReaScript`
-itself and then exits. Not built yet since it adds real complexity
+for `main.lua` and then runs the same logic `install_toolbar_button.lua`
+already has, and then exits. Not built yet since it adds real complexity
 (locating `reaper.exe`, handling REAPER already being open, handling a
 portable install) for a one-time step the user only does once anyway.
 

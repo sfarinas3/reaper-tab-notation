@@ -1,4 +1,4 @@
-Installation complete. Two things to do before it'll show up in REAPER:
+Installation complete. Three things to do before it'll show up in REAPER:
 
 1. If you haven't already, install ReaPack and ReaImGui:
    - ReaPack: https://reapack.com/
@@ -10,5 +10,12 @@ Installation complete. Two things to do before it'll show up in REAPER:
    - Select main.lua from the folder you just installed to.
    - Run it from the Action List whenever you want the viewer - it'll
      dock like any other REAPER window.
+
+3. Add a one-click toolbar button (one-time, optional but recommended):
+   - In REAPER: Actions > Show Action List > New Action > Load ReaScript
+   - Select install_toolbar_button.lua from the same folder, then run it
+     from the Action List.
+   - Restart REAPER - a new button appears on the Main toolbar that opens
+     the viewer directly, no more digging through the Action List.
 
 Select a MIDI item on a track and the tab/notation view will appear.
