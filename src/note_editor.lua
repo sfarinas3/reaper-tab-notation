@@ -26,11 +26,13 @@
 -- string.
 --
 -- Shamisen only, the popup also offers a technique tag (Sukui, Hajiki,
--- Uchi, Suri, Oshibachi/Suberi, Keshi), written as a REAPER notation event
--- via midi_read.lua's read/write convention (see that file's header) -
--- find_notation_event locates any existing event for this exact note
--- (tick+chan+pitch) so a technique change updates/clears it in place
--- rather than leaving stale duplicate events behind.
+-- Uchi, Suri, Oshibachi/Suberi, Keshi), stored via midi_read.lua's
+-- take-level P_EXT map (see that file's header for why this isn't a MIDI
+-- event) - commit_technique reads the take's current map, updates/clears
+-- this one note's entry, and writes the whole map back. Since P_EXT
+-- changes are invisible to midi_read.get_notes_hash, this module has to
+-- signal main.lua's cache-invalidation itself rather than relying on that
+-- hash - see technique_changed/end_frame's return value below.
 
 local config = require('config')
 local ui_chrome = require('ui_chrome')
@@ -41,7 +43,6 @@ local M = {}
 local HIT_RADIUS = 8 -- px around a fret-number/x's drawn position that counts as a click
 local POPUP_ID = "note_editor_popup"
 local UNDO_ALL = -1 -- Undo_EndBlock's extraflags: -1 = all undo-state flags, the standard idiom
-local NOTATION_EVT_TYPE = 15 -- REAPER's own "notation event" MIDI meta-event type
 
 -- Numbered per the source list this was requested from - the id is this
 -- popup's own selection key, and also what draw_tab.lua's TECHNIQUE_SYMBOLS
@@ -117,54 +118,33 @@ local function commit_edit(ctx, new_pitch, new_chan)
   reaper.ImGui_CloseCurrentPopup(ctx)
 end
 
--- Finds the existing notation event (if any) for exactly this note - same
--- tick, channel, pitch, matching midi_read.lua's own read convention.
--- Returns (index, full_message) or nil if none exists yet.
-local function find_notation_event(take, note)
-  local ok, _, _, textsyxevtcnt = reaper.MIDI_CountEvts(take)
-  if not ok then return nil end
+-- Set once by commit_technique, read (and reset) by end_frame's return
+-- value - this module's own "please recompute" signal, since a P_EXT
+-- change is invisible to midi_read.get_notes_hash (see that file's
+-- header). Mirrors ui_chrome.draw's own changed-boolean pattern.
+local technique_changed = false
 
-  for i = 0, textsyxevtcnt - 1 do
-    local evt_ok, _, _, ppqpos, evt_type, msg = reaper.MIDI_GetTextSysexEvt(take, i)
-    if evt_ok and evt_type == NOTATION_EVT_TYPE and ppqpos == note.startppq then
-      local chan, pitch = msg:match("^NOTE (%d+) (%d+)")
-      if chan and tonumber(chan) == note.chan and tonumber(pitch) == note.pitch then
-        return i, msg
-      end
-    end
-  end
-  return nil
-end
-
--- Sets (technique_id given) or clears (nil) this note's technique tag,
--- preserving any other key/value pairs already on that note's notation
--- event (e.g. a disp_len tweak made in REAPER's own notation editor)
--- rather than clobbering the whole message.
+-- Sets (technique_id given) or clears (nil) this note's technique tag in
+-- the take's technique map (midi_read.lua), then writes the whole map
+-- back - P_EXT only holds one string per key per take, not a per-note
+-- slot, so every write re-serializes the full map rather than patching a
+-- single entry in place.
 local function commit_technique(ctx, technique_id)
   local note = target.note
   local take = target.take
-  local idx, existing_msg = find_notation_event(take, note)
+  -- Matches midi_read.lua's M.read_notes key construction exactly (same
+  -- startppq/chan/pitch values, same .. concatenation) so the two always
+  -- agree on this note's key.
+  local key = note.startppq .. ":" .. note.chan .. ":" .. note.pitch
 
-  local base = existing_msg
-    and (existing_msg:gsub("%s*" .. midi_read.TECH_KEY .. " %d+", ""))
-    or string.format("NOTE %d %d", note.chan, note.pitch)
-  local minimal = string.format("NOTE %d %d", note.chan, note.pitch)
-  local new_msg = technique_id and (base .. " " .. midi_read.TECH_KEY .. " " .. technique_id) or base
+  local map = midi_read.read_technique_map(take)
+  map[key] = technique_id
 
   reaper.Undo_BeginBlock()
-  if idx then
-    if new_msg == minimal then
-      -- Nothing else was on this event - clearing the technique would
-      -- leave an empty, redundant notation event, so remove it outright.
-      reaper.MIDI_DeleteTextSysexEvt(take, idx)
-    else
-      reaper.MIDI_SetTextSysexEvt(take, idx, nil, nil, nil, nil, new_msg, nil)
-    end
-  elseif technique_id then
-    reaper.MIDI_InsertTextSysexEvt(take, false, false, note.startppq, NOTATION_EVT_TYPE, new_msg)
-  end
+  reaper.GetSetMediaItemTakeInfo_String(take, midi_read.TECH_EXT_KEY, midi_read.serialize_technique_map(map), true)
   reaper.Undo_EndBlock("Set shamisen technique (tab/notation viewer)", UNDO_ALL)
 
+  technique_changed = true
   target = nil
   reaper.ImGui_CloseCurrentPopup(ctx)
 end
@@ -218,7 +198,11 @@ end
 -- Call once per frame after every system has been checked. Opens the
 -- popup for this frame's closest hit (if any), then draws it if it's
 -- currently open - the standard ImGui "OpenPopup this frame, BeginPopup
--- every frame" pattern.
+-- every frame" pattern. Returns true exactly once, the frame after a
+-- technique commit - callers should treat that as "please recompute,"
+-- the same role ui_chrome.draw's own return value plays for settings
+-- changes (see this file's header for why a hash check alone can't
+-- notice a technique change).
 function M.end_frame(ctx, take)
   if clicked and best then
     target = { take = take, note = best.note }
@@ -231,6 +215,10 @@ function M.end_frame(ctx, take)
     reaper.ImGui_EndPopup(ctx)
   end
   popup_was_open = is_open
+
+  local changed = technique_changed
+  technique_changed = false
+  return changed
 end
 
 return M

@@ -150,6 +150,14 @@ local last_take = nil
 local cached_render_model = nil
 local cached_measure_ticks = nil
 local cached_measure_info = nil
+-- Set from the PREVIOUS frame's note_editor.end_frame return value (a
+-- technique commit happened) - note_editor.lua's popup interaction runs
+-- after this frame's own recompute check (it needs this frame's systems
+-- for hit-testing), so its "please recompute" signal can only take effect
+-- next frame. At 60fps that's imperceptible - see note_editor.lua's
+-- header for why a technique change needs this at all (it lives in P_EXT,
+-- invisible to the note-hash check).
+local pending_recompute = false
 
 local function set_toolbar_state(state)
   local _, _, section, cmd = reaper.get_action_context()
@@ -184,8 +192,9 @@ local function main()
   -- touch the MIDI take, so the hash alone would never notice them.
   local settings_changed = ui_chrome.draw(ctx, config, take)
 
-  if hash ~= last_hash or settings_changed or take_settings_changed then
+  if hash ~= last_hash or settings_changed or take_settings_changed or pending_recompute then
     last_hash = hash
+    pending_recompute = false
     if take then
       local notes = midi_read.read_notes(take)
       local events = midi_read.group_into_events(notes)
@@ -218,14 +227,14 @@ local function main()
     -- (e.g. the user deselected the item mid-edit), skipping this call
     -- would leave ReaImGui's popup stack out of sync for a frame.
     note_editor.begin_frame(ctx)
-    note_editor.end_frame(ctx, take)
+    pending_recompute = note_editor.end_frame(ctx, take)
     return
   end
 
   if not cached_render_model or #cached_render_model == 0 then
     reaper.ImGui_TextWrapped(ctx, "Selected item has no notes.")
     note_editor.begin_frame(ctx)
-    note_editor.end_frame(ctx, take)
+    pending_recompute = note_editor.end_frame(ctx, take)
     return
   end
 
@@ -402,7 +411,7 @@ local function main()
     end
   end
 
-  note_editor.end_frame(ctx, take)
+  pending_recompute = note_editor.end_frame(ctx, take)
 
   local total_height = top_reserve + (#systems * system_pitch - config.layout.system_gap) + BOTTOM_MARGIN
 
