@@ -109,7 +109,7 @@ local PRESETS = {
 -- is_grand check is string_count > 6), so shamisen gets treble-clef-only
 -- notation automatically, with no separate flag needed.
 local INSTRUMENTS = {
-  { name = "Guitar", tuning = { 64, 59, 55, 50, 45, 40 }, max_fret = 17 },
+  { name = "Guitar", tuning = { 64, 59, 55, 50, 45, 40 }, max_fret = 24 },
   -- Bunkafu positions commonly run to about 18-19 on the top string.
   { name = "Shamisen", tuning = { 60, 53, 48 }, max_fret = 19 },
 }

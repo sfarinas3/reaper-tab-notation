@@ -27,7 +27,7 @@ M.capo = 0
 -- (e.g. shamisen bunkafu positions commonly run to ~18-19). User-editable
 -- via ui_chrome.lua's "Max Fret" field, and set automatically by its
 -- "Instrument" preset dropdown.
-M.max_fret = 17
+M.max_fret = 24
 
 -- Starting key signature, as a signed circle-of-fifths count (positive =
 -- that many sharps, negative = that many flats, 0 = C major/no
