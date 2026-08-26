@@ -152,6 +152,14 @@ local last_take = nil
 local cached_render_model = nil
 local cached_measure_ticks = nil
 local cached_measure_info = nil
+-- assigned_events (pre-layout: notes+string/fret, no x positions yet) -
+-- cached alongside cached_render_model rather than only kept as main()'s
+-- local, so pdf_export.lua can re-run layout_engine.compute() a second
+-- time under print-only spacing constants (see pdf_export.lua's
+-- HORIZONTAL_COMPRESSION) without re-reading MIDI or re-running the fret
+-- heuristic - only the live view's own cached_render_model is built from
+-- this at normal on-screen spacing.
+local cached_assigned_events = nil
 -- Set from the PREVIOUS frame's note_editor.end_frame return value (a
 -- technique commit happened) - note_editor.lua's popup interaction runs
 -- after this frame's own recompute check (it needs this frame's systems
@@ -180,7 +188,7 @@ end
 -- Export button can trigger a real export without that UI-only module
 -- needing to know anything about the render model or PDF writing itself.
 local function do_export(filepath)
-  return pdf_export.export(ctx, config, cached_render_model, cached_measure_ticks, cached_measure_info, filepath)
+  return pdf_export.export(ctx, config, cached_assigned_events, cached_measure_ticks, cached_measure_info, filepath)
 end
 
 local function main()
@@ -218,6 +226,7 @@ local function main()
       -- assigned_events already has, identically to what the eventual
       -- render model would carry.
       cached_measure_ticks, cached_measure_info = notation_model.measure_boundaries(take, assigned_events)
+      cached_assigned_events = assigned_events
       -- Layout only needs recomputing when the notes actually change (or,
       -- later, on panel resize/zoom) - cached here alongside the heuristic
       -- result rather than recomputed every frame.
@@ -230,6 +239,7 @@ local function main()
       cached_render_model = nil
       cached_measure_ticks = nil
       cached_measure_info = nil
+      cached_assigned_events = nil
     end
   end
 
