@@ -810,6 +810,29 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
         last_staff_by_string[note.string] = staff
       end
 
+      -- Hanging tie: this is the LAST note of the current system, and it
+      -- continues into the next one (tied_to_next, from layout_engine.
+      -- compute's barline-crossing split - see its header - landing on a
+      -- measure boundary that also happens to be a system-wrap point).
+      -- M.draw is called once per system with fresh local state (see
+      -- last_notehead_by_string above), so it has no visibility into the
+      -- next system's notes at all - the normal tie arc, which needs BOTH
+      -- endpoints, simply can't run there, and a matching "incoming" mark
+      -- at the START of the next system would need the SAME missing
+      -- information in reverse. Standard notation practice for a tie
+      -- crossing a line break: draw the curve rising off the last note and
+      -- continuing to the system's own right edge with no resolved
+      -- endpoint; the continuation note at the start of the next system
+      -- needs nothing extra beyond its own full notehead (already how
+      -- every tied note renders here regardless of system boundaries).
+      if note.tied_to_next and note.string and i == #render_model then
+        local stem_down = y <= y_at(middle_line_offset(staff))
+        local arc_y = stem_down and (y - TIE_ARC_HEIGHT) or (y + TIE_ARC_HEIGHT)
+        local edge_x = origin_x + content_width
+        reaper.ImGui_DrawList_AddBezierCubic(
+          draw_list, actual_x, y, actual_x, arc_y, edge_x, arc_y, edge_x, arc_y, COLOR_NOTE, 1.5, 0)
+      end
+
       by_staff[staff] = by_staff[staff] or {}
       table.insert(by_staff[staff], y)
     end

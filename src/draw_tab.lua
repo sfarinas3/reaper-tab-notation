@@ -276,6 +276,24 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
         draw_let_ring_line(draw_list, label_end_x + LET_RING_GAP, ring_end_x, y)
       end
 
+      -- Hanging tie: mirrors draw_notation.lua's own version (see that
+      -- file's comment for the full reasoning - M.draw is called once per
+      -- system with fresh local state, so a tie continuing into the NEXT
+      -- system has no visibility into it here). The INCOMING side at the
+      -- start of a system already works for free: a new system's first
+      -- note has no last_x_by_string entry yet, so it falls through to
+      -- the normal label branch above and shows the fret number again -
+      -- a legitimate, common real tab convention for a line-break
+      -- continuation, arguably clearer here than on the notation staff
+      -- since tab relies on explicit numbers rather than notehead
+      -- position. Only the OUTGOING side, at the end of a system, needs
+      -- this.
+      if note.string and note.tied_to_next and i == #render_model then
+        local edge_x = origin_x + content_width
+        local arc_y = y - line_height * 0.4
+        reaper.ImGui_DrawList_AddBezierCubic(draw_list, x, y, x, arc_y, edge_x, arc_y, edge_x, arc_y, COLOR_TIE, 1.5, 0)
+      end
+
       if note.string then
         last_x_by_string[note.string] = x
       end
