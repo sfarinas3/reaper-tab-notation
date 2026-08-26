@@ -102,6 +102,8 @@ local COLOR_PLAYHEAD = 0xFF6020FF
 local MIN_SYSTEM_WIDTH = 150 -- floor for a transiently tiny/collapsing window, so wrapping never degenerates
 local WINDOW_CHROME_RESERVE = 40 -- fixed estimate for window padding + a possible vertical scrollbar
 local BARLINE_NOTE_GAP = 14 -- px a barline is shifted left of its exact tick position, so it doesn't sit on top of the next measure's first note
+local FINAL_BARLINE_GAP = 3 -- px between the thin and thick strokes of the piece's closing barline (standard "final barline" convention)
+local FINAL_BARLINE_THICK_WIDTH = 3.0 -- px stroke weight of the final barline's thick stroke
 local BOTTOM_MARGIN = 10 -- px reserved below the last system, so the bottom tab string's fret-number text doesn't clip against the window's bottom edge
 local MEASURE_LABEL_ABOVE_GAP = 14 -- px above the notation staff's top line where the measure-number label sits
 local TEMPO_LABEL_ABOVE_GAP = 28 -- px above the notation staff's top line where the tempo label sits (above the measure-number label)
@@ -377,9 +379,23 @@ local function main()
     -- since that tick is usually shared with the next measure's first
     -- note - drawn exactly on top of it otherwise, with no breathing room.
     local bar_top, bar_bottom = sys_origin_y, tab_origin_y + tab_staff_height
-    for _, local_x in ipairs(system.barline_x) do
+    for bi, local_x in ipairs(system.barline_x) do
       local x = origin_x + local_x - BARLINE_NOTE_GAP
       reaper.ImGui_DrawList_AddLine(draw_list, x, bar_top, x, bar_bottom, color_dim, 1.0)
+
+      -- Final barline: standard notation always closes the very last
+      -- measure of the whole piece with a thin+thick pair rather than the
+      -- plain single line every other barline uses - a real, once-live gap
+      -- since every barline rendered identically before this, giving no
+      -- visual cue at all that the piece had actually ended. Only the
+      -- LAST system's LAST barline entry qualifies (barline_x's own final
+      -- entry on every other system is just that system's closing
+      -- boundary, shared with the next system's opening one - not the
+      -- piece's true end).
+      if s == #systems and bi == #system.barline_x then
+        local thick_x = x + FINAL_BARLINE_GAP
+        reaper.ImGui_DrawList_AddLine(draw_list, thick_x, bar_top, thick_x, bar_bottom, color_dim, FINAL_BARLINE_THICK_WIDTH)
+      end
     end
 
     -- Measure numbers: item-relative (counted from this take's own start)

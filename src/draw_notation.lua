@@ -143,6 +143,8 @@ local LET_RING_DASH_LEN = 4 -- px length of each dash
 local LET_RING_GAP_LEN = 3 -- px gap between dashes
 local LEDGER_OVERHANG = 3 -- px a ledger line extends past the notehead on each side
 local ACCIDENTAL_GAP = 3 -- px between an accidental symbol and the notehead it applies to
+local ACCIDENTAL_STACK_GAP = 8 -- px extra left-shift per collision column (see compute_accidental_columns)
+local GRACE_NOTEHEAD_RADIUS = 2 -- px - a grace note's small "crushed" notehead (vs. config.layout.notehead_radius for a normal one)
 local TIE_ARC_HEIGHT = 6 -- px the tie curve rises above the notes it connects
 local TIE_STUB_REACH = 16 -- px a system-crossing tie's incoming half reaches back from its note, into the header's own clear space before the first note
 local REST_RECT_W, REST_RECT_H = 8, 4 -- whole/half rest rectangle size
@@ -301,6 +303,20 @@ local function draw_flags(draw_list, stem_x, tip_y, count, direction)
   end
 end
 
+-- Grace note ("crushed" acciaccatura) slash: a short diagonal stroke
+-- through the stem, standard notation's mark that a note claims no
+-- rhythmic value of its own (see layout_engine.lua's is_grace header for
+-- what qualifies). Cuts across near the notehead end of the stem, at the
+-- same angle/side as that direction's flag would use, so it reads as one
+-- coherent "crushed note" mark alongside the flag rather than a stray line.
+local GRACE_SLASH_LEN = 7 -- px, the slash's own diagonal length
+local function draw_grace_slash(draw_list, stem_x, tip_y, direction)
+  local y0 = tip_y + (direction == "down" and -GRACE_SLASH_LEN or GRACE_SLASH_LEN)
+  local half = GRACE_SLASH_LEN / 2
+  reaper.ImGui_DrawList_AddLine(
+    draw_list, stem_x - half, y0 + half, stem_x + half, y0 - half, COLOR_NOTE, 1.5)
+end
+
 local REST_HOOK_DX = 6 -- px horizontal reach of each rest hook (back over the stroke, toward -x)
 local REST_HOOK_DY = 4 -- px vertical rise of each rest hook
 local REST_HOOK_SPACING = 5 -- px between stacked hooks (sixteenth rest's second hook)
@@ -426,15 +442,24 @@ local function compute_notehead_offsets(note_staff, note_diatonic_offset, radius
     if #indices >= 2 then
       table.sort(indices, function(a, b) return note_diatonic_offset[a] < note_diatonic_offset[b] end)
 
-      local sum = 0
-      for _, j in ipairs(indices) do sum = sum + note_diatonic_offset[j] end
-      -- Local to this event's own notes on this staff, not the beam
-      -- group's overall average (computed later, in Pass 2/3) - a
-      -- deliberate simplification that only disagrees with the group's
-      -- real stem direction in the rare case an event's own local
-      -- average pitch sits on the opposite side of the middle line from
-      -- its beam group's overall average.
-      local stem_down = (sum / #indices) >= middle_line_offset(staff)
+      -- Standard notation rule: the notehead FARTHEST from the middle
+      -- line decides stem direction, not the chord's average pitch (a
+      -- real, once-live bug - an average can sit on the opposite side of
+      -- the middle line from every individual outlier, e.g. a chord
+      -- clustered just above the line plus one note far below it would
+      -- average out "above," even though the far note below is what
+      -- should actually decide "up"). indices is sorted ascending, so
+      -- the lowest/highest are its own first/last entries. Local to this
+      -- event's own notes on this staff, not the beam group's overall
+      -- geometry (decided later, in Pass 2/3) - a deliberate
+      -- simplification that only disagrees with the group's real stem
+      -- direction in the rare case an event's own local extremes sit on
+      -- the opposite side of the middle line from its beam group's
+      -- overall one.
+      local mid = middle_line_offset(staff)
+      local dist_above = note_diatonic_offset[indices[#indices]] - mid
+      local dist_below = mid - note_diatonic_offset[indices[1]]
+      local stem_down = dist_above >= dist_below
 
       local order = {}
       if stem_down then
@@ -460,6 +485,44 @@ local function compute_notehead_offsets(note_staff, note_diatonic_offset, radius
   end
 
   return shift
+end
+
+-- Chord accidental collision: two notes needing an accidental symbol whose
+-- noteheads are close enough in y that their symbols would visually
+-- overlap even when they're NOT a diatonic second (compute_notehead_
+-- offsets, above, only staggers noteheads for that one specific interval -
+-- e.g. a chord spanning a third with both outer notes altered has no
+-- notehead collision at all, but its two accidentals, both hugging the
+-- left side, still clash). Works from the bottom of the chord upward (real
+-- engraving's own convention): each accidental gets the smallest "column"
+-- (an extra left-shift multiplier) that doesn't collide with anything
+-- already placed nearby, so 3+ closely stacked accidentals step
+-- progressively further left rather than only ever getting two columns.
+-- shows_accidental: sparse map j -> accidental value, only for notes that
+-- actually show one this chord (from the caller's own baseline/measure-
+-- suppression decision - this function doesn't need to know what the
+-- symbol IS, only which notes have one and where). Returns j -> column
+-- index (0 = no collision, draw at the normal position).
+local ACCIDENTAL_COLLIDE_DIST = 10 -- px - closer than this in y and two accidentals visually clash
+local function compute_accidental_columns(shows_accidental, note_y)
+  local js = {}
+  for j, _ in pairs(shows_accidental) do table.insert(js, j) end
+  table.sort(js, function(a, b) return note_y[a] > note_y[b] end) -- bottom (largest y) first
+
+  local column = {}
+  local placed = {}
+  for _, j in ipairs(js) do
+    local y = note_y[j]
+    local col = 0
+    for _, p in ipairs(placed) do
+      if math.abs(p.y - y) < ACCIDENTAL_COLLIDE_DIST then
+        col = math.max(col, p.col + 1)
+      end
+    end
+    column[j] = col
+    table.insert(placed, { y = y, col = col })
+  end
+  return column
 end
 
 -- Pixel extents above/below middle_c_y this staff needs, independent of
@@ -499,6 +562,31 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
 
   local function y_at(offset)
     return notation_model.y_for_diatonic(mc + offset, middle_c_y, half_step, mc)
+  end
+
+  -- Standard engraving practice (Behind Bars et al.): a stem's default
+  -- length is only correct for notes on or near the staff - a note several
+  -- ledger lines out gets its stem LENGTHENED so the far end still reaches
+  -- in toward (just short of) the staff's own middle line, rather than
+  -- floating disconnected in space with only the default-length stem. A
+  -- real, once-live gap: stem_length was a flat constant everywhere, so
+  -- extended-range/high-position content (routine on this app's own
+  -- 7-9-string guitar support) rendered every far-out note's stem the same
+  -- short length as an in-staff one. extreme_y is the notehead nearest the
+  -- stem's own free end (the bottommost of a "down" cluster, topmost of an
+  -- "up" one - the same point every existing tip_y/beam_y calculation
+  -- already measures stem_length from); never shorter than the configured
+  -- default, only ever longer.
+  local STEM_LEDGER_MARGIN = 2 -- px short of the middle line a lengthened stem stops, so it doesn't visually touch it
+  local function stem_length_for(extreme_y, direction, staff)
+    local middle_y = y_at(middle_line_offset(staff))
+    local reach_to_middle
+    if direction == "down" then
+      reach_to_middle = middle_y - extreme_y - STEM_LEDGER_MARGIN
+    else
+      reach_to_middle = extreme_y - middle_y - STEM_LEDGER_MARGIN
+    end
+    return math.max(stem_length, reach_to_middle)
   end
 
   local content_width = 0
@@ -685,6 +773,28 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
     for j = 1, #event.notes do note_diatonic_offset[j] = note_diatonic[j] - mc end
     local note_x_offset = compute_notehead_offsets(note_staff, note_diatonic_offset, radius)
 
+    -- Step B.5: which notes actually need an accidental symbol shown (the
+    -- baseline/measure-suppression decision - unchanged logic, just moved
+    -- up front instead of living inline in Step C's draw loop below),
+    -- plus horizontal stacking for any pair close enough to collide (see
+    -- compute_accidental_columns) - both need the whole chord's picture at
+    -- once, which Step C's per-note loop can't offer on its own.
+    local shows_accidental = {}
+    for j = 1, #event.notes do
+      local note = event.notes[j]
+      if note.string then
+        local diatonic, letter = note_diatonic[j], note_letter[j]
+        local accidental = note_accidental[j]
+        local baseline = accidental_state[diatonic]
+        if baseline == nil then baseline = key_acc_map[letter] or 0 end
+        if baseline ~= accidental then
+          shows_accidental[j] = accidental
+          accidental_state[diatonic] = accidental
+        end
+      end
+    end
+    local accidental_column = compute_accidental_columns(shows_accidental, note_y)
+
     -- Step C: draw (ledger lines, accidental, notehead, tie), using each
     -- note's own actual x (this event's x plus its offset, if any) -
     -- everywhere a note's own visual position matters. The stem itself
@@ -693,39 +803,34 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
     for j = 1, #event.notes do
       local note = event.notes[j]
       local staff, diatonic = note_staff[j], note_diatonic[j]
-      local accidental, letter = note_accidental[j], note_letter[j]
       local y = note_y[j]
       local actual_x = x + note_x_offset[j]
+      -- Grace notes (layout_engine.lua's is_grace - see its header) get a
+      -- small "crushed" notehead, so every radius-relative measurement
+      -- here (ledger overhang, accidental gap, the notehead itself) scales
+      -- down to match rather than a full-size notehead with a tiny stem.
+      local note_radius = event.is_grace and GRACE_NOTEHEAD_RADIUS or radius
 
       for _, ledger_offset in ipairs(notation_model.ledger_line_offsets(diatonic - mc, is_grand)) do
         local ly = y_at(ledger_offset)
         reaper.ImGui_DrawList_AddLine(
-          draw_list, actual_x - radius - LEDGER_OVERHANG, ly, actual_x + radius + LEDGER_OVERHANG, ly, COLOR_LINE, 1.0)
+          draw_list, actual_x - note_radius - LEDGER_OVERHANG, ly, actual_x + note_radius + LEDGER_OVERHANG, ly, COLOR_LINE, 1.0)
       end
 
-      -- Accidentals imply a real, spellable pitch - skip them for notes
-      -- outside the instrument's playable range (see the X-notehead
-      -- branch below), which don't represent one. The baseline to compare
-      -- against is the key signature's own accidental for this letter
-      -- (not always "natural") - a note whose spelling matches what the
-      -- key signature already implies needs no symbol; accidental_state
-      -- then remembers whatever was last actually shown at this position
-      -- this measure, so a repeat within the measure doesn't re-show it
-      -- and a later note reverting it shows the correct symbol (including
-      -- a natural, if the key signature itself had altered this letter).
-      if note.string then
-        local baseline = accidental_state[diatonic]
-        if baseline == nil then baseline = key_acc_map[letter] or 0 end
-        if baseline ~= accidental then
-          local symbol = ACCIDENTAL_SYMBOLS[accidental] or "?"
-          local w, h = reaper.ImGui_CalcTextSize(ctx, symbol)
-          reaper.ImGui_DrawList_AddText(draw_list, actual_x - radius - ACCIDENTAL_GAP - w, y - h / 2, COLOR_NOTE, symbol)
-          accidental_state[diatonic] = accidental
-        end
+      if shows_accidental[j] then
+        local symbol = ACCIDENTAL_SYMBOLS[shows_accidental[j]] or "?"
+        local w, h = reaper.ImGui_CalcTextSize(ctx, symbol)
+        local extra = (accidental_column[j] or 0) * ACCIDENTAL_STACK_GAP
+        reaper.ImGui_DrawList_AddText(draw_list, actual_x - note_radius - ACCIDENTAL_GAP - w - extra, y - h / 2, COLOR_NOTE, symbol)
       end
 
       if note.string then
-        -- Half notes and whole notes get the standard open/hollow
+        -- Grace notes always get a small filled notehead regardless of
+        -- duration_ticks (which is meaninglessly tiny for one anyway - see
+        -- layout_engine.lua's is_grace header) - no hollow/whole-note
+        -- treatment, since a grace note claims no rhythmic value of its
+        -- own to distinguish. Otherwise: half notes and whole notes get
+        -- the standard open/hollow
         -- notehead; quarter notes and shorter get the standard filled
         -- one. Duration alone decides this (not stem presence, which
         -- whole notes also lack) - without this split, a half note and a
@@ -733,10 +838,12 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
         -- same stem, neither has a flag), the only other distinguishing
         -- feature being a whole note's missing stem, which a half note
         -- also has.
-        if event.duration_ticks >= HALF_NOTE_TICKS then
-          reaper.ImGui_DrawList_AddCircle(draw_list, actual_x, y, radius, COLOR_NOTE, 0, HOLLOW_NOTEHEAD_THICKNESS)
+        if event.is_grace then
+          reaper.ImGui_DrawList_AddCircleFilled(draw_list, actual_x, y, note_radius, COLOR_NOTE, 0)
+        elseif event.duration_ticks >= HALF_NOTE_TICKS then
+          reaper.ImGui_DrawList_AddCircle(draw_list, actual_x, y, note_radius, COLOR_NOTE, 0, HOLLOW_NOTEHEAD_THICKNESS)
         else
-          reaper.ImGui_DrawList_AddCircleFilled(draw_list, actual_x, y, radius, COLOR_NOTE, 0)
+          reaper.ImGui_DrawList_AddCircleFilled(draw_list, actual_x, y, note_radius, COLOR_NOTE, 0)
         end
       else
         -- Outside the instrument's playable range - the fret heuristic
@@ -744,8 +851,8 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
         -- represents a string mute or scrape rather than a real note, so
         -- it gets an X notehead (standard notation convention for
         -- percussive/indefinite-pitch sounds) instead of a filled circle.
-        reaper.ImGui_DrawList_AddLine(draw_list, actual_x - radius, y - radius, actual_x + radius, y + radius, COLOR_NOTE, 1.5)
-        reaper.ImGui_DrawList_AddLine(draw_list, actual_x - radius, y + radius, actual_x + radius, y - radius, COLOR_NOTE, 1.5)
+        reaper.ImGui_DrawList_AddLine(draw_list, actual_x - note_radius, y - note_radius, actual_x + note_radius, y + note_radius, COLOR_NOTE, 1.5)
+        reaper.ImGui_DrawList_AddLine(draw_list, actual_x - note_radius, y + note_radius, actual_x + note_radius, y - note_radius, COLOR_NOTE, 1.5)
       end
 
       -- Augmentation dot (dotted note - a dotted half is worth 3 beats,
@@ -758,9 +865,12 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
       -- rather than replicating every fine engraving rule, so this skips
       -- that nudge too. event.duration_ticks (not the note's own true
       -- endppq) is what's actually notated here, same value everything
-      -- else about this note's shape/flags already reads.
-      if notation_model.is_dotted_duration(event.duration_ticks) then
-        reaper.ImGui_DrawList_AddCircleFilled(draw_list, actual_x + radius + DOT_GAP, y, DOT_RADIUS, COLOR_NOTE, 0)
+      -- else about this note's shape/flags already reads. Grace notes
+      -- (whose duration_ticks is a meaningless tiny value - see layout_
+      -- engine.lua's is_grace header) never get one; a grace note has no
+      -- augmentable rhythmic value to begin with.
+      if not event.is_grace and notation_model.is_dotted_duration(event.duration_ticks) then
+        reaper.ImGui_DrawList_AddCircleFilled(draw_list, actual_x + note_radius + DOT_GAP, y, DOT_RADIUS, COLOR_NOTE, 0)
       end
 
       -- Let ring: this note's actual MIDI sustain outlasts its own
@@ -786,7 +896,7 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
       if note.string and note.endppq and not note.tied_to_next
           and render_model[i + 1] and note.endppq > render_model[i + 1].tick then
         local ring_end_x = origin_x + layout_engine.x_for_tick(render_model, note.endppq)
-        draw_let_ring_line(draw_list, actual_x + radius + LET_RING_GAP, ring_end_x, y, COLOR_LET_RING)
+        draw_let_ring_line(draw_list, actual_x + note_radius + LET_RING_GAP, ring_end_x, y, COLOR_LET_RING)
       end
 
       if note.tied_from_prev and note.string and last_notehead_by_string[note.string] then
@@ -871,22 +981,48 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
 
   -- Rests: gaps in the timeline, positioned via layout_engine.x_for_tick
   -- since (unlike notes) they don't have their own render_model entries -
-  -- see notation_model.detect_rests for the (simplified) classification.
-  -- Always placed at the treble staff's middle line regardless of which
-  -- staff nearby notes are on - a further refinement left for later.
+  -- see notation_model.detect_rests for the (simplified) classification
+  -- and its own whole_measure shorthand (a completely silent bar always
+  -- gets a single whole rest, regardless of time signature - the standard
+  -- convention). measure_ticks feeds that shorthand directly.
+  --
+  -- Staff placement (grand staff only - single-clef guitar is always
+  -- treble): a rest takes whichever staff the music was on immediately
+  -- before it, via a forward-advancing pointer into render_model (both are
+  -- tick-ordered already) - a real, once-live gap, since every rest used
+  -- to render on the treble staff regardless of context, which put a rest
+  -- floating disconnected from a bass-clef passage it actually belongs to.
+  -- Falls back to treble for any rest before the first note (nothing yet
+  -- to inherit from), same as the old fixed behavior.
   local leading_tick = measure_ticks and measure_ticks[1]
-  local rests = notation_model.detect_rests(render_model, leading_tick)
-  local rest_y = y_at(middle_line_offset("treble"))
+  local rests = notation_model.detect_rests(render_model, leading_tick, measure_ticks)
+  local rest_event_ptr = 0
+  local function staff_for_rest(rest_tick)
+    if not is_grand then return "treble" end
+    while rest_event_ptr < #render_model and render_model[rest_event_ptr + 1].tick <= rest_tick do
+      rest_event_ptr = rest_event_ptr + 1
+    end
+    local ns = rest_event_ptr > 0 and event_note_staff[rest_event_ptr]
+    return (ns and ns[1]) or "treble"
+  end
   for _, rest in ipairs(rests) do
     local x = origin_x + layout_engine.x_for_tick(render_model, rest.tick)
-    draw_rest(draw_list, x, rest_y, rest_shape(rest.duration_ticks))
+    local staff = staff_for_rest(rest.tick)
+    local rest_y = y_at(middle_line_offset(staff))
+    -- A whole-measure (silent-bar) rest always uses the whole-rest glyph,
+    -- independent of its actual duration_ticks (which can be more or less
+    -- than a true whole note in any meter besides 4/4) - and, being a
+    -- fixed bar-shorthand rather than a real notated value, never gets an
+    -- augmentation dot either.
+    local shape = rest.whole_measure and "whole" or rest_shape(rest.duration_ticks)
+    draw_rest(draw_list, x, rest_y, shape)
     -- Augmentation dot (dotted rest) - same standard-notation rule as a
     -- dotted note (see the notehead dot's own comment), just placed clear
     -- of the widest rest glyph (the whole/half rectangle, REST_RECT_W
     -- wide) rather than hugging each shape's own narrower actual width -
     -- one fixed offset for all shapes, the same kind of simplification
     -- this file's rest glyphs already are.
-    if notation_model.is_dotted_duration(rest.duration_ticks) then
+    if not rest.whole_measure and notation_model.is_dotted_duration(rest.duration_ticks) then
       reaper.ImGui_DrawList_AddCircleFilled(draw_list, x + REST_RECT_W / 2 + DOT_GAP, rest_y, DOT_RADIUS, COLOR_NOTE, 0)
     end
   end
@@ -945,13 +1081,23 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
           if event_staff[ei][staff] then table.insert(staff_members, ei) end
         end
 
-        local min_y, max_y, sum = ys[1], ys[1], 0
+        local min_y, max_y = ys[1], ys[1]
         for _, y in ipairs(ys) do
           if y < min_y then min_y = y end
           if y > max_y then max_y = y end
-          sum = sum + y
         end
-        local natural_direction = (sum / #ys <= y_at(middle_line_offset(staff))) and "down" or "up"
+        -- Standard rule: the notehead FARTHEST from the middle line
+        -- decides stem direction (see compute_notehead_offsets' matching
+        -- comment above for the bug this replaces - an average could
+        -- disagree with every individual outlier). min_y is the
+        -- topmost/highest-pitched notehead in this group/event, max_y the
+        -- bottommost/lowest-pitched - whichever is farther from the
+        -- middle line (in pixels, larger y = lower pitch = farther below)
+        -- wins.
+        local middle_y = y_at(middle_line_offset(staff))
+        local dist_above = middle_y - min_y
+        local dist_below = max_y - middle_y
+        local natural_direction = (dist_above >= dist_below) and "down" or "up"
 
         -- Tie inheritance: if any note across this group/event on this
         -- staff continues a tie whose predecessor's direction is already
@@ -996,7 +1142,8 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
         end
 
         if gi then
-          local beam_y = direction == "down" and (max_y + stem_length) or (min_y - stem_length)
+          local reach = stem_length_for(direction == "down" and max_y or min_y, direction, staff)
+          local beam_y = direction == "down" and (max_y + reach) or (min_y - reach)
           -- staff_x's min/max are raw notehead x's; stems (Pass 3) are
           -- drawn offset by +/-radius depending on direction, so the beam
           -- has to match that same offset or it'll overhang past the
@@ -1120,15 +1267,21 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
           -- Stem-down attaches on the LEFT of the notehead, stem-up on
           -- the RIGHT (see the matching comment on stem_x_offset above).
           if data.direction == "down" then
-            local tip_y = data.max_y + stem_length
+            local tip_y = data.max_y + stem_length_for(data.max_y, "down", staff)
             reaper.ImGui_DrawList_AddLine(draw_list, x - radius, data.min_y, x - radius, tip_y, COLOR_NOTE, 1.0)
-            if event.duration_ticks < config.layout.ppq_per_quarter then
+            if event.is_grace then
+              draw_flags(draw_list, x - radius, tip_y, 1, "down")
+              draw_grace_slash(draw_list, x - radius, tip_y, "down")
+            elseif event.duration_ticks < config.layout.ppq_per_quarter then
               draw_flags(draw_list, x - radius, tip_y, notation_model.duration_dash_count(event.duration_ticks), "down")
             end
           else
-            local tip_y = data.min_y - stem_length
+            local tip_y = data.min_y - stem_length_for(data.min_y, "up", staff)
             reaper.ImGui_DrawList_AddLine(draw_list, x + radius, data.max_y, x + radius, tip_y, COLOR_NOTE, 1.0)
-            if event.duration_ticks < config.layout.ppq_per_quarter then
+            if event.is_grace then
+              draw_flags(draw_list, x + radius, tip_y, 1, "up")
+              draw_grace_slash(draw_list, x + radius, tip_y, "up")
+            elseif event.duration_ticks < config.layout.ppq_per_quarter then
               draw_flags(draw_list, x + radius, tip_y, notation_model.duration_dash_count(event.duration_ticks), "up")
             end
           end

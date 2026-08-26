@@ -459,9 +459,35 @@ end
 -- 2+ are returned - a lone beamable note gets a flag instead, which is
 -- the drawer's concern, not this module's. Each group is a list of
 -- indices into render_model, in order.
+--
+-- A rest between two otherwise-adjacent beamable events breaks the beam,
+-- even within the same nominal beat - a real, once-live bug: rests aren't
+-- their own render_model entries (see M.detect_rests - they're detected
+-- separately, as gaps in the timeline), so this used to compare pure
+-- array-adjacency + beat index with no visibility at all into whether real
+-- silence actually separated two notes, drawing one unbroken beam bar
+-- straight across a rest inside a beat (e.g. a 16th/16th-rest/16th
+-- syncopation) with no visual break to show the rest was ever there.
+-- Detected via last_event_end, a running "end of whatever most recently
+-- sounded" tracker updated for EVERY event including grace notes (below) -
+-- comparing against just the last INCLUDED beamable event would instead
+-- have to special-case grace notes' own tiny gap before their main note as
+-- a false rest; updating it unconditionally sidesteps that entirely.
+--
+-- Grace notes (layout_engine.compute's is_grace flag - an ornamental note
+-- far too short to be a real rhythmic value, e.g. a hammer-on/pull-off
+-- captured as a near-instantaneous MIDI note) are transparent to beam
+-- grouping: they never join a beam themselves (a grace note gets its own
+-- individual small stem+slash - see draw_notation.lua), but they also must
+-- not BREAK an otherwise-continuous run of real beamable notes around
+-- them, the same way a rest should. Simply skipping them for grouping
+-- purposes - neither extending `current` nor flushing it - achieves that;
+-- last_event_end still advances past them (see above) so they don't get
+-- mistaken for a rest gap either.
 function M.group_beams(render_model, beat_ticks_lookup)
   local groups = {}
   local current, current_beat = nil, nil
+  local last_event_end = nil
 
   local function flush()
     if current and #current >= 2 then
@@ -472,22 +498,50 @@ function M.group_beams(render_model, beat_ticks_lookup)
 
   for i = 1, #render_model do
     local event = render_model[i]
-    local is_beamable = event.duration_ticks < config.layout.ppq_per_quarter
-    local beat_index = math.floor(event.tick / beat_ticks_lookup(event.tick))
+    local has_rest_gap = last_event_end and event.tick > last_event_end
+    last_event_end = event.tick + event.duration_ticks
 
-    if is_beamable and current and beat_index == current_beat then
-      table.insert(current, i)
-    else
-      flush()
-      if is_beamable then
-        current = { i }
-        current_beat = beat_index
+    if not event.is_grace then
+      local is_beamable = event.duration_ticks < config.layout.ppq_per_quarter
+      local beat_index = math.floor(event.tick / beat_ticks_lookup(event.tick))
+
+      if is_beamable and current and beat_index == current_beat and not has_rest_gap then
+        table.insert(current, i)
+      else
+        flush()
+        if is_beamable then
+          current = { i }
+          current_beat = beat_index
+        end
       end
     end
   end
   flush()
 
   return groups
+end
+
+-- Barline ticks strictly between start and finish - the same rule
+-- layout_engine.compute's own crossings_within uses for notes, applied here
+-- to rest gaps so a rest never straddles a barline either.
+local function measure_crossings(measure_ticks, start, finish)
+  local out = {}
+  if not measure_ticks then return out end
+  for _, t in ipairs(measure_ticks) do
+    if t > start and t < finish then table.insert(out, t) end
+  end
+  return out
+end
+
+-- The measure_ticks index (not the tick itself) of the measure containing
+-- tick t - measure_ticks is ascending, so the last boundary <= t. nil if t
+-- is before the very first boundary.
+local function measure_index_for(measure_ticks, t)
+  local idx = nil
+  for i = 1, #measure_ticks do
+    if measure_ticks[i] <= t then idx = i else break end
+  end
+  return idx
 end
 
 -- Detects gaps in render_model's timeline - a note-event ending before the
@@ -498,8 +552,27 @@ end
 -- gap that doesn't cleanly match one duration class will under-represent
 -- its true length rather than being decomposed into multiple rest
 -- symbols (e.g. a dotted rest, or a tied pair) - an accepted
--- simplification at this scope. Returns a list of {tick, duration_ticks}.
-function M.detect_rests(render_model, leading_tick)
+-- simplification at this scope.
+--
+-- measure_ticks (optional, same array layout_engine.compute's opts.
+-- measure_ticks and M.measure_boundaries both use): when given, a gap is
+-- first split at any barline it crosses - a silent stretch spanning two
+-- measures produces one rest per measure, not one rest sized to whichever
+-- duration class the combined (and generally non-standard) length happens
+-- to fit. Any resulting sub-gap that covers a measure ENTIRELY (its own
+-- silence, start to end, with no note anywhere in it) gets marked
+-- whole_measure = true instead of running through the normal duration
+-- classifier - standard notation practice draws a single whole rest
+-- centered in an empty bar regardless of its actual time signature (a
+-- silent 3/4 or 5/8 bar is still one whole rest, not a dotted-half or
+-- oddly-tied rest spelling out the exact beat count) - draw_notation.lua
+-- reads this flag to draw the whole-rest glyph and skip augmentation-dot
+-- logic, and centers it using the returned tick (already the measure's
+-- own midpoint for this case, not its start). Omitting measure_ticks
+-- reproduces this function's pre-existing behavior exactly (no splitting,
+-- no whole-measure shorthand).
+-- Returns a list of {tick, duration_ticks, whole_measure}.
+function M.detect_rests(render_model, leading_tick, measure_ticks)
   local rests = {}
   local classes = config.layout.duration_classes -- ascending by ticks
 
@@ -512,9 +585,33 @@ function M.detect_rests(render_model, leading_tick)
   end
 
   local function add_gap(gap_start, gap_ticks)
-    local duration = classify(gap_ticks)
-    if duration then
-      table.insert(rests, { tick = gap_start, duration_ticks = duration })
+    local gap_end = gap_start + gap_ticks
+    local crossings = measure_crossings(measure_ticks, gap_start, gap_end)
+
+    local seg_start = gap_start
+    for c = 1, #crossings + 1 do
+      local seg_end = crossings[c] or gap_end
+
+      local mi = measure_ticks and measure_index_for(measure_ticks, seg_start)
+      local measure_start = mi and measure_ticks[mi]
+      local measure_end = mi and measure_ticks[mi + 1]
+      local is_whole_measure = measure_start and measure_end
+          and seg_start <= measure_start and seg_end >= measure_end
+
+      if is_whole_measure then
+        table.insert(rests, {
+          tick = (measure_start + measure_end) / 2,
+          duration_ticks = measure_end - measure_start,
+          whole_measure = true,
+        })
+      else
+        local duration = classify(seg_end - seg_start)
+        if duration then
+          table.insert(rests, { tick = seg_start, duration_ticks = duration })
+        end
+      end
+
+      seg_start = seg_end
     end
   end
 

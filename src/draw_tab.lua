@@ -325,7 +325,7 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
     local rest_string = math.ceil(n_strings / 2) -- the middle string - see this file's header
     local rest_y = origin_y + (rest_string - 1) * line_height
     local leading_tick = measure_ticks and measure_ticks[1]
-    local rests = notation_model.detect_rests(render_model, leading_tick)
+    local rests = notation_model.detect_rests(render_model, leading_tick, measure_ticks)
     for _, rest in ipairs(rests) do
       local x = origin_x + layout_engine.x_for_tick(render_model, rest.tick)
       reaper.ImGui_DrawList_AddCircleFilled(draw_list, x, rest_y, REST_DOT_RADIUS, COLOR_TEXT, 0)

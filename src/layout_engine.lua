@@ -73,12 +73,33 @@
 -- narrower engraving nicety this doesn't attempt - see this file's
 -- existing tie-inference comment for why exact beat-perfect splitting
 -- everywhere is out of scope.
+--
+-- Grace notes: an event whose notated duration (post gap-cap, i.e. the
+-- actual time until the next onset - not necessarily its raw MIDI length)
+-- is shorter than GRACE_NOTE_TICKS is far too brief to be a real rhythmic
+-- value - almost always an ornamental hammer-on/pull-off/slide captured as
+-- a near-simultaneous MIDI note immediately ahead of the note it
+-- decorates, not an intentional 128th-or-shorter note. Flagged is_grace on
+-- the render-model entry and given a small fixed width (GRACE_NOTE_WIDTH)
+-- instead of the normal duration-class width, so it renders "crushed"
+-- immediately before its main note rather than claiming its own
+-- proportional slice of the beat - draw_notation.lua draws it as a small
+-- slashed-stem notehead with no augmentation dot or hollow-notehead
+-- treatment, and notation_model.group_beams treats it as transparent to
+-- beam grouping (neither beamed itself nor breaking a real beam group
+-- around it). The gap-cap already makes this check equivalent to "is this
+-- event's time-to-next-onset itself tiny" for the common case (a grace
+-- note immediately followed by its main note); a genuinely short LAST
+-- note of a phrase with nothing after it to cap against is judged on its
+-- own raw duration, the same rule.
 
 local config = require('config')
 
 local M = {}
 
 M.PPQ_PER_QUARTER = config.layout.ppq_per_quarter
+local GRACE_NOTE_TICKS = M.PPQ_PER_QUARTER / 32 -- half of a 64th note - config.layout.duration_classes' own shortest real class
+local GRACE_NOTE_WIDTH = 10 -- px - a small fixed width, not duration-proportional
 
 -- Interpolates a pixel width for duration_ticks from config.layout's
 -- duration-class table, in log-tick space so the curve is smooth rather
@@ -134,7 +155,7 @@ end
 -- repeated fast notes are the more common and more disruptive case.
 --
 -- Returns a render model: list of
---   { tick, x, duration_ticks, notes = {..., tied_from_prev, tied_to_next} }
+--   { tick, x, duration_ticks, is_grace, notes = {..., tied_from_prev, tied_to_next} }
 -- Only x differs in meaning per staff; y is each drawer's own concern.
 function M.compute(events, opts)
   opts = opts or {}
@@ -164,12 +185,15 @@ function M.compute(events, opts)
   end
 
   -- Appends one render-model entry (advancing x by its own duration-class
-  -- width) and returns it, so the caller can chain barline-split segments.
+  -- width, or GRACE_NOTE_WIDTH for a grace note - see this file's header)
+  -- and returns it, so the caller can chain barline-split segments.
   local function emit(tick, duration_ticks, notes)
-    local entry = { tick = tick, x = x, duration_ticks = duration_ticks, notes = notes }
+    local is_grace = duration_ticks < GRACE_NOTE_TICKS
+    local entry = { tick = tick, x = x, duration_ticks = duration_ticks, notes = notes, is_grace = is_grace }
     result[#result + 1] = entry
     local content_width = measure_width and measure_width(entry) or 0
-    local step_width = math.max(width_for_duration(duration_ticks), content_width + min_gap)
+    local base_width = is_grace and GRACE_NOTE_WIDTH or width_for_duration(duration_ticks)
+    local step_width = math.max(base_width, content_width + min_gap)
     x = x + step_width
     return entry
   end
