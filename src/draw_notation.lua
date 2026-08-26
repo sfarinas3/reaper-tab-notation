@@ -32,6 +32,14 @@
 -- since detecting tuplets from raw MIDI timing is a rhythm-transcription
 -- problem disproportionate to the rest of this project's scope.
 --
+-- Noteheads are open/hollow (AddCircle) for half notes and whole notes,
+-- filled (AddCircleFilled) for quarter notes and shorter - the standard
+-- notation distinction. A real, once-live bug: this used to be filled
+-- unconditionally, so a half note and a quarter note rendered completely
+-- identically (same notehead, same stem, neither has a flag) - the only
+-- other visual cue distinguishing durations, a whole note's missing stem,
+-- doesn't help tell a half from a quarter since both have one.
+--
 -- A note with no valid string/fret (fret_heuristic couldn't place it
 -- within the instrument's range) gets an X notehead instead of a filled
 -- circle - most often this represents a string mute/scrape rather than a
@@ -116,6 +124,8 @@ local TREBLE_OFFSETS = { 2, 4, 6, 8, 10 }   -- E4 G4 B4 D5 F5
 local BASS_OFFSETS = { -10, -8, -6, -4, -2 } -- G2 B2 D3 F3 A3
 
 local WHOLE_NOTE_TICKS = config.layout.ppq_per_quarter * 4
+local HALF_NOTE_TICKS = config.layout.ppq_per_quarter * 2
+local HOLLOW_NOTEHEAD_THICKNESS = 1.5 -- px stroke weight for half/whole notes' open notehead (vs. a quarter-or-shorter's filled one)
 local FLAG_SPACING = 6 -- px between stacked flags along a stem, for 16th/32nd/64th notes
 local BEAM_BAR_GAP = 4 -- px between stacked parallel beam bars, for 16th/32nd/64th beamed groups
 local LET_RING_GAP = 3 -- px between the notehead's edge and where the let-ring dashing starts
@@ -702,7 +712,19 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
       end
 
       if note.string then
-        reaper.ImGui_DrawList_AddCircleFilled(draw_list, actual_x, y, radius, COLOR_NOTE, 0)
+        -- Half notes and whole notes get the standard open/hollow
+        -- notehead; quarter notes and shorter get the standard filled
+        -- one. Duration alone decides this (not stem presence, which
+        -- whole notes also lack) - without this split, a half note and a
+        -- quarter note were rendered identically (same filled circle,
+        -- same stem, neither has a flag), the only other distinguishing
+        -- feature being a whole note's missing stem, which a half note
+        -- also has.
+        if event.duration_ticks >= HALF_NOTE_TICKS then
+          reaper.ImGui_DrawList_AddCircle(draw_list, actual_x, y, radius, COLOR_NOTE, 0, HOLLOW_NOTEHEAD_THICKNESS)
+        else
+          reaper.ImGui_DrawList_AddCircleFilled(draw_list, actual_x, y, radius, COLOR_NOTE, 0)
+        end
       else
         -- Outside the instrument's playable range - the fret heuristic
         -- found no valid string/fret for this pitch. Most often this
