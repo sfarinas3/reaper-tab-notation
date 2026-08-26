@@ -35,13 +35,13 @@ local MARGIN_PT = 36 -- 0.5in on all sides
 -- horizontal note-spacing constants (to pack more measures per line
 -- without shrinking noteheads/text) and it looked exactly like what it
 -- was - notes smooshed together at their original size. This SCALE is
--- the only knob for "how much fits per page" now; 0.55 is a middle
--- ground between legible text (0.75, ~1-2 measures/line) and maximum
--- density (~0.3 would reliably fit 4 measures/line but shrinks a typical
--- 13-15px UI font down to ~4pt, too small to be useful even on screen).
--- Retune this one constant if a piece's own note density wants more/less
--- packed in - lower = smaller and denser, higher = larger and sparser.
-local SCALE = 0.55
+-- the only knob for "how much fits per page" now. 0.3 targets ~4
+-- measures/line at typical note density - the cost is a typical 13-15px
+-- UI font printing at roughly 4-4.5pt, on the small side even for a
+-- printed page; if that reads as too small in practice, raise this
+-- toward 0.4-0.5 (fewer measures/line, more legible text) rather than
+-- reaching for the old horizontal-only trick.
+local SCALE = 0.3
 
 -- Always black-on-white regardless of the live view's own color scheme
 -- (which defaults to white ink on a dark panel - printing that literally
