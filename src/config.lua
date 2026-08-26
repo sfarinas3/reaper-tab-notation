@@ -102,7 +102,7 @@ M.layout = {
   min_gap = 6,            -- minimum pixels between adjacent events' rendered content
   left_margin = 90,       -- room for the clef (every system) + time signature (first system, and wherever it changes) + a clear gap before the first note
   right_margin = 24,
-  line_height = 16,       -- vertical spacing between tab staff lines
+  line_height = 14,       -- vertical spacing between tab staff lines
 
   notation_line_spacing = 8, -- px between adjacent notation staff lines (half of this per diatonic step)
   notehead_radius = 3,
