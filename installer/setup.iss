@@ -21,12 +21,21 @@
 ; GitHub being reachable or its release asset URLs never changing, at
 ; the cost of needing a manual refresh here for a newer version later.
 ;
-; This does NOT register the script as a REAPER action or add its
-; toolbar button - POST_INSTALL.txt (shown on the last wizard page) tells
-; the user the one remaining manual one-time step (Load ReaScript for
-; main.lua, then run install_toolbar_button.lua once - see that file's
-; own header for why the toolbar button specifically can't be set up
-; from here either, unlike the extensions above).
+; Registering the script as a REAPER action and adding its toolbar
+; button (install_toolbar_button.lua) needs REAPER's own scripting API,
+; which only exists while REAPER is running - this installer .exe can't
+; call it directly. Instead, the [Run] section below launches REAPER
+; itself with install_toolbar_button.lua as a command-line argument once
+; Setup finishes (a real, working REAPER command-line feature: passing a
+; .lua file runs it; -nonewinst hands it to an already-running instance
+; instead of opening a second one) - REAPER's own install path is looked
+; up via the registry (see GetReaperExePath below, verified against a
+; real install: HKLM\SOFTWARE\REAPER's default value). This is
+; best-effort: if REAPER's install path can't be found, that [Run] entry
+; simply doesn't appear, and POST_INSTALL.txt's manual instructions
+; (Load ReaScript for main.lua, then run install_toolbar_button.lua) are
+; the fallback - always kept up to date even though the automatic path
+; now covers the common case.
 ; See ..\DISTRIBUTION.md for the full packaging writeup, including what's
 ; deliberately deferred (license-key gating, Lua bytecode precompilation)
 ; and how to add each without restructuring this script.
@@ -81,3 +90,81 @@ Source: "..\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubd
 ; have their existing (possibly newer) version silently downgraded.
 Source: "..\vendor\reaper_imgui64.dll"; DestDir: "{app}\..\..\UserPlugins"; Flags: onlyifdoesntexist
 Source: "..\vendor\reaper_reapack64.dll"; DestDir: "{app}\..\..\UserPlugins"; Flags: onlyifdoesntexist
+
+[Run]
+; postinstall: shown as a checked-by-default checkbox on the finish page
+; (labeled via Description below), not run unconditionally - a real
+; side effect (opening REAPER) deserves to be visible/optional, same as
+; any installer's "Launch the app now" checkbox. nowait: critical - if
+; REAPER isn't already running, this LAUNCHES it (a real REAPER session
+; that stays open), not a script that runs and exits; without nowait,
+; Setup would sit frozen on the finish page until the user closes
+; REAPER. skipifsilent: never launch REAPER during an unattended/silent
+; install. Check: only offered at all if GetReaperExePath found a real
+; reaper.exe - see the [Code] section below.
+Filename: "{code:GetReaperExePath}"; Parameters: "-nonewinst ""{app}\install_toolbar_button.lua"""; Description: "Finish setup automatically (registers the script and adds its toolbar button - opens REAPER if it isn't already running)"; Flags: postinstall nowait skipifsilent; Check: ReaperExeFound
+
+[Code]
+var
+  CachedReaperExe: String;
+  CachedReaperExeChecked: Boolean;
+
+// Locates reaper.exe. Tries the registry key REAPER's own installer
+// writes first (HKLM\SOFTWARE\REAPER's default value = the install
+// directory - confirmed against a real REAPER install during
+// development), then HKCU for a per-user install, then a couple of
+// common default paths as a last resort (e.g. a portable install
+// someone copied into place by hand, with no registry entry at all).
+// Returns '' if none of those pan out - callers must treat that as
+// "couldn't find it," not a path to blindly use.
+function FindReaperExe(): String;
+var
+  InstallDir: String;
+begin
+  Result := '';
+
+  if RegQueryStringValue(HKLM, 'SOFTWARE\REAPER', '', InstallDir) then begin
+    if FileExists(AddBackslash(InstallDir) + 'reaper.exe') then begin
+      Result := AddBackslash(InstallDir) + 'reaper.exe';
+      Exit;
+    end;
+  end;
+
+  if RegQueryStringValue(HKCU, 'SOFTWARE\REAPER', '', InstallDir) then begin
+    if FileExists(AddBackslash(InstallDir) + 'reaper.exe') then begin
+      Result := AddBackslash(InstallDir) + 'reaper.exe';
+      Exit;
+    end;
+  end;
+
+  if FileExists(ExpandConstant('{pf}\REAPER (x64)\reaper.exe')) then begin
+    Result := ExpandConstant('{pf}\REAPER (x64)\reaper.exe');
+    Exit;
+  end;
+  if FileExists(ExpandConstant('{pf}\REAPER\reaper.exe')) then begin
+    Result := ExpandConstant('{pf}\REAPER\reaper.exe');
+    Exit;
+  end;
+  if FileExists(ExpandConstant('{pf32}\REAPER\reaper.exe')) then begin
+    Result := ExpandConstant('{pf32}\REAPER\reaper.exe');
+    Exit;
+  end;
+end;
+
+// FindReaperExe does registry/filesystem lookups - cache the result so
+// the [Run] entry's Filename (GetReaperExePath) and Check
+// (ReaperExeFound) don't redo that work independently; Inno Setup can
+// evaluate both during the same wizard pass.
+function GetReaperExePath(Param: String): String;
+begin
+  if not CachedReaperExeChecked then begin
+    CachedReaperExe := FindReaperExe();
+    CachedReaperExeChecked := True;
+  end;
+  Result := CachedReaperExe;
+end;
+
+function ReaperExeFound(): Boolean;
+begin
+  Result := GetReaperExePath('') <> '';
+end;

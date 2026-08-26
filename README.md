@@ -43,8 +43,16 @@ assignment) that mirrors it.
 1. Download and run `ReaperTabNotation-Setup.exe` (see `dist/` if
    you're building from source, or wherever you received it) - no admin
    rights required, it's a per-user install.
-2. Two one-time setup steps remain inside REAPER itself - full
-   click-by-click instructions are on the installer's finish page and in
+2. On the finish page, leave the checked "Finish setup automatically"
+   checkbox checked and click Finish. This opens REAPER (or hands off to
+   it if it's already running) and registers everything itself: the
+   viewer becomes a REAPER action, and a one-click button is added to
+   the Main toolbar. If REAPER was already open, close and reopen it
+   afterward so the toolbar button appears (REAPER only reads its
+   toolbar layout at startup).
+3. If that checkbox didn't appear (REAPER's install location couldn't be
+   found automatically), do the same two things by hand - full
+   click-by-click instructions are in
    [`installer/POST_INSTALL.txt`](installer/POST_INSTALL.txt):
    1. Load `main.lua` as a REAPER action (Actions > Show action list...
       > New action... > Load ReaScript...), then run it to open the

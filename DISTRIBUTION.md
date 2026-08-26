@@ -30,34 +30,46 @@ install time) so a friend's install never depends on internet access or
 GitHub's release URLs staying put - the tradeoff is a pinned version that
 needs a manual bump in `vendor/` for updates, same as any bundled binary.
 
-It deliberately does NOT:
-- Register the script as a REAPER action automatically, or add its
-  Main-toolbar button. Both require REAPER's own scripting API
-  (`reaper.AddRemoveReaScript`, and a read-modify-write of
-  `reaper-menu.ini` - see `install_toolbar_button.lua`'s own header),
-  callable only from a script already running inside REAPER - an
-  installer `.exe` running outside REAPER can't call it directly. The
-  installer's finish page (`installer/POST_INSTALL.txt`) instead tells
-  the user the two manual one-time steps: Load ReaScript for `main.lua`
-  (Actions > Show Action List > New Action > Load ReaScript), then run
-  `install_toolbar_button.lua` the same way once to get the toolbar
-  button.
+Registering the script as a REAPER action and adding its Main-toolbar
+button both require REAPER's own scripting API
+(`reaper.AddRemoveReaScript`, and a read-modify-write of
+`reaper-menu.ini` - see `install_toolbar_button.lua`'s own header),
+callable only from a script already running inside REAPER - an installer
+`.exe` running outside REAPER can't call it directly. Instead, the
+`[Run]` section launches REAPER itself with `install_toolbar_button.lua`
+as a command-line argument once Setup finishes: a checked-by-default
+"Finish setup automatically" checkbox on the finish page runs
+`reaper.exe -nonewinst "...\install_toolbar_button.lua"` (a real REAPER
+command-line feature - passing a `.lua` path runs it as a script;
+`-nonewinst` hands it to an already-running instance instead of opening
+a second one). Since `install_toolbar_button.lua` registers `main.lua`
+as an action as a side effect of adding the toolbar button, this one
+step covers both, not just the toolbar half.
+
+`reaper.exe`'s path is looked up via the registry
+(`installer/setup.iss`'s `[Code]` section, `FindReaperExe`) -
+`HKLM\SOFTWARE\REAPER`'s default value holds the install directory
+(confirmed against a real install during development), with `HKCU` and a
+couple of common default paths as fallbacks for a portable/manually-
+placed install with no registry entry. This is best-effort: if none of
+those resolve, the checkbox simply doesn't appear at all (`Check:
+ReaperExeFound`), and `installer/POST_INSTALL.txt`'s manual instructions
+- Load ReaScript for `main.lua`, then run `install_toolbar_button.lua`
+the same way once - are the documented fallback, kept up to date even
+though the automatic path now covers the common case.
+
+The `[Run]` entry uses `nowait`: if REAPER isn't already running, this
+step actually *launches* REAPER (a real session that stays open), not a
+script that runs and exits - without `nowait`, Setup would sit frozen on
+the finish page until the user closed REAPER. It also uses
+`skipifsilent`, so an unattended/silent install never launches REAPER as
+a side effect.
 
 ### Building it
 
 1. Install [Inno Setup](https://jrsoftware.org/isinfo.php) (free).
 2. From the repo root: `ISCC installer\setup.iss`
 3. Output: `dist\ReaperTabNotation-Setup.exe` - this is the file to share.
-
-### A future improvement: zero manual steps
-
-Could close the remaining "two manual steps" gap by having the installer
-launch REAPER with a tiny one-shot bootstrap ReaScript
-(`reaper.exe -nonewinst bootstrap.lua`) that calls `AddRemoveReaScript`
-for `main.lua` and then runs the same logic `install_toolbar_button.lua`
-already has, and then exits. Not built yet since it adds real complexity
-(locating `reaper.exe`, handling REAPER already being open, handling a
-portable install) for a one-time step the user only does once anyway.
 
 ## Deferred: license-key prompt
 

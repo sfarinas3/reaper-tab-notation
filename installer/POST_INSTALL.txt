@@ -1,13 +1,23 @@
 Installation complete. ReaImGui and ReaPack (REAPER's own extensions this
-script needs) were installed automatically - if REAPER was open during
-setup, restart it now so they load.
+script needs) were installed automatically.
 
-Two things left to do before the viewer shows up in REAPER. Both use the
-same REAPER feature ("Load ReaScript") - full steps below.
+On the next page, a checked checkbox offers to "Finish setup
+automatically" - leave it checked and click Finish. This opens REAPER
+(or hands off to it if it's already running) and registers everything:
+the viewer becomes a REAPER action, and a one-click button is added to
+the Main toolbar. If REAPER was already open, close and reopen it
+afterward so the toolbar button appears (REAPER only reads its toolbar
+layout at startup); if REAPER just opened fresh because of this step,
+you're already set.
 
 ===============================================================
-STEP 1: Load main.lua (one-time)
+If that checkbox didn't appear, or setup didn't seem to work
 ===============================================================
+This happens if REAPER's install location couldn't be found automatically
+(e.g. a non-standard install). Do these two steps by hand instead - both
+use REAPER's "Load ReaScript" feature:
+
+STEP 1: Load main.lua
 1. In REAPER's main menu bar, click Actions > Show action list...
 2. In the Action List window that opens, click the "New action..."
    button (bottom-left), then choose "Load ReaScript...".
@@ -19,23 +29,14 @@ STEP 1: Load main.lua (one-time)
 5. main.lua now appears in the Action List, already selected/
    highlighted. Click "Run" (or just double-click it) to open the
    viewer - it docks like any other REAPER window.
-6. To find it again later without redoing these steps: open the Action
-   List, type "tab" or "notation" in the filter box at the top, and
-   double-click main.lua in the results. (Step 2 below sets up a
-   one-click toolbar button instead, so you won't need to do this.)
 
-===============================================================
-STEP 2: Add a one-click toolbar button (one-time, optional but
-recommended)
-===============================================================
-1. In REAPER: Actions > Show action list... (same window as Step 1).
+STEP 2: Add the toolbar button
+1. Actions > Show action list... (same window as Step 1).
 2. "New action..." > "Load ReaScript..." again.
 3. This time select install_toolbar_button.lua, from that same folder.
-4. Select it in the Action List and click "Run" (or double-click it).
-   A message box confirms it was added.
-5. Restart REAPER - reaper-menu.ini (REAPER's toolbar layout file) is
-   only read at startup. After restarting, a new button appears on the
-   Main toolbar that opens the viewer directly - no more Action List.
+4. Select it in the Action List and click "Run" (or double-click it). A
+   message box confirms it was added.
+5. Restart REAPER - the new button then appears on the Main toolbar.
 
 ===============================================================
 Using it
