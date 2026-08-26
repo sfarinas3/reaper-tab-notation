@@ -597,9 +597,22 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
     return math.max(stem_length, reach_to_middle)
   end
 
+  -- Width from note positions alone, plus - a real, once-live bug - a
+  -- floor at this system's own closing barline (barline_x's last entry,
+  -- same local coordinate space as render_model's own .x, both shifted by
+  -- wrap_into_systems' render_offset). Without that floor, a measure whose
+  -- notes end partway through it (e.g. two beats of notes, two beats of
+  -- trailing rest - see notation_model.detect_rests' own trailing-silence
+  -- handling) had its staff lines stop at the last NOTE's position, well
+  -- short of the barline that's actually drawn farther right by main.lua
+  -- - the measure visually read as truncated even though the barline
+  -- itself, and the rest filling the gap, were both already correct.
   local content_width = 0
   for i = 1, #render_model do
     if render_model[i].x > content_width then content_width = render_model[i].x end
+  end
+  if barline_x and barline_x[#barline_x] and barline_x[#barline_x] > content_width then
+    content_width = barline_x[#barline_x]
   end
   content_width = content_width + config.layout.right_margin
 

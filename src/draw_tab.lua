@@ -272,9 +272,17 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks,
   local line_height = config.layout.line_height
   local staff_height = (n_strings - 1) * line_height
 
+  -- Width from note positions alone, plus a floor at this system's own
+  -- closing barline (barline_x's last entry) - see draw_notation.lua's
+  -- matching comment for the full reasoning: without it, a measure whose
+  -- notes end partway through it had its staff lines stop well short of
+  -- the barline actually drawn farther right, reading as truncated.
   local content_width = 0
   for i = 1, #render_model do
     if render_model[i].x > content_width then content_width = render_model[i].x end
+  end
+  if barline_x and barline_x[#barline_x] and barline_x[#barline_x] > content_width then
+    content_width = barline_x[#barline_x]
   end
   content_width = content_width + config.layout.right_margin
 
