@@ -10,18 +10,21 @@
 -- notation staff draws for the same notes. Consumes layout_engine.
 -- compute()'s render model - does no layout math of its own.
 --
--- Ties: standard tab convention (unlike the notation staff's curved arc,
--- which relies on a separate notehead to arc between) is to repeat the
--- fret number in parentheses - "(5)" - meaning "still sounding, not
--- re-picked," the same notation published tab (e.g. Hal Leonard editions)
--- and tab software both use for a held note, a bend's target pitch, etc.
--- label_for wraps a tied_from_prev note's own label in parens; nothing
--- else about how a label is measured or drawn needs to know a note is
--- tied, which is what lets the SAME code path handle a plain, tied, and
--- X-notehead label uniformly. A tie crossing a system/line break still
--- gets an additional small stub arc (below) leading into its repeated
--- number, since two numbers on physically different lines don't read as
--- connected purely from repetition the way two adjacent ones do.
+-- Ties: standard tab convention repeats the fret number in parentheses -
+-- "(5)" - meaning "still sounding, not re-picked," the same notation
+-- published tab (e.g. Hal Leonard editions) and tab software both use for
+-- a held note, a bend's target pitch, etc. label_for wraps a tied_from_
+-- prev note's own label in parens; nothing else about how a label is
+-- measured or drawn needs to know a note is tied, which is what lets the
+-- SAME code path handle a plain, tied, and X-notehead label uniformly.
+-- This app draws the connecting arc TOO (this file's own established
+-- look, matching the notation staff's tie curve above it), ending just
+-- left of the parenthesized number rather than dead-center on top of it,
+-- so the curve and the text read as one combined mark instead of
+-- overlapping. A tie crossing a system/line break gets the same kind of
+-- stub arc leading into its repeated number, since two numbers on
+-- physically different lines otherwise have no shared coordinate space to
+-- arc across.
 --
 -- When config.instrument == "Shamisen", numbers also get bunkafu-style
 -- duration dashes stacked underneath (source: shamisen-zentrale.de's
@@ -232,6 +235,7 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
   draw_tab_label(ctx, draw_list, origin_x + TAB_LABEL_X_OFFSET, origin_y, staff_height)
 
   local is_shamisen = config.instrument == "Shamisen"
+  local last_x_by_string = {}
 
   for i = 1, #render_model do
     local event = render_model[i]
@@ -244,27 +248,35 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
 
       -- label_for wraps a tied note's own label in parentheses - "(5)" -
       -- so this is the SAME code path for a plain, tied, or X-notehead
-      -- label; a tie needs no branch of its own here (see this file's
-      -- header for why that's the standard tab convention, replacing an
-      -- earlier version that drew an arc with no number at all).
+      -- label; the tie arc below is drawn on top of/alongside it, not
+      -- instead of it (see this file's header).
       local label = label_for(note)
       local w, h = reaper.ImGui_CalcTextSize(ctx, label)
       local color = note.string and COLOR_TEXT or COLOR_UNREACHABLE
       reaper.ImGui_DrawList_AddText(draw_list, x - w / 2, y - h / 2, color, label)
       local label_end_x = x + w / 2
 
-      -- Incoming half of a tie crossing a system break: M.draw is called
-      -- once per system with fresh local state, so a tie continuing from
-      -- the PREVIOUS system's last note has nothing here to connect back
-      -- to purely from repeating "(5)" on this line - a small stub arc
-      -- leading into the parenthesized number makes the line-break
-      -- continuation explicit, mirroring draw_notation.lua's own
-      -- tied_from_prev/i==1 branch. Only ever true for a system's first
-      -- event, and only when tied_from_prev is set (which the very first
-      -- note of the whole piece can never be) - so this never fires except
-      -- on a genuine cross-system tie. Ends just left of the parenthesized
-      -- number rather than at its own center, so the two don't overlap.
-      if note.string and note.tied_from_prev and i == 1 then
+      if note.string and note.tied_from_prev and last_x_by_string[note.string] then
+        -- Same-system tie: arcs from the previous note's own position to
+        -- just left of this note's parenthesized number (not dead-center
+        -- on top of it, which would draw the curve straight through the
+        -- text).
+        local x0 = last_x_by_string[note.string]
+        local stub_end_x = x - w / 2 - LET_RING_GAP
+        local arc_y = y - line_height * 0.4
+        reaper.ImGui_DrawList_AddBezierCubic(
+          draw_list, x0, y, x0, arc_y, stub_end_x, arc_y, stub_end_x, y, COLOR_TIE, 1.5, 0)
+      elseif note.string and note.tied_from_prev and i == 1 then
+        -- Incoming half of a tie crossing a system break: M.draw is
+        -- called once per system with fresh local state, so a tie
+        -- continuing from the PREVIOUS system's last note has no local
+        -- predecessor position to arc from - a small fixed-reach stub
+        -- leading into the parenthesized number makes the line-break
+        -- continuation explicit, mirroring draw_notation.lua's own
+        -- tied_from_prev/i==1 branch. Only ever true for a system's first
+        -- event, and only when tied_from_prev is set (which the very
+        -- first note of the whole piece can never be) - so this never
+        -- fires except on a genuine cross-system tie.
         local stub_end_x = x - w / 2 - LET_RING_GAP
         local stub_x = stub_end_x - TIE_STUB_REACH
         local arc_y = y - line_height * 0.4
@@ -323,6 +335,10 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
         local edge_x = origin_x + content_width
         local arc_y = y - line_height * 0.4
         reaper.ImGui_DrawList_AddBezierCubic(draw_list, x, y, x, arc_y, edge_x, arc_y, edge_x, arc_y, COLOR_TIE, 1.5, 0)
+      end
+
+      if note.string then
+        last_x_by_string[note.string] = x
       end
     end
   end
