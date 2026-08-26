@@ -46,6 +46,33 @@
 -- an eighth). Standard rhythm-transcription practice is that a note's
 -- written value reflects time-until-next-onset, not its own release; this
 -- cap is a no-op for the ordinary non-overlapping case.
+--
+-- Barline-crossing (opts.measure_ticks): standard engraving practice is
+-- that a note is NEVER drawn crossing a barline as a single symbol -
+-- crossing one always requires splitting into tied notes, one ending
+-- exactly at the barline and the next starting exactly there, same as how
+-- a duration crossing a beat boundary already requires a tie (the
+-- pre-existing same-string tie inference below, for two genuinely
+-- separate MIDI events). This does the equivalent split for a SINGLE
+-- event's notated span, whenever it alone would otherwise cross one or
+-- more barlines with nothing else re-attacking in between (a long held
+-- note/chord) - without it, such a note either gets misclassified as
+-- whatever duration class its raw span happens to fall into (e.g. a note
+-- starting on beat 2 showing as a whole note, which isn't a valid reading
+-- - a whole note by definition starts on beat 1) or simply has no visual
+-- representation at all past the barline it crosses. Emits one render-
+-- model entry per measure segment the span touches, each tied to the
+-- next (note.tied_to_next) in addition to the existing tied_from_prev on
+-- every segment after the first - both flags matter downstream:
+-- tied_to_next tells the "let ring" feature above not to also draw its
+-- own dashed line between two segments of the SAME split note (the tie
+-- curve already shows the continuation); tied_from_prev is what the
+-- existing tie-drawing/tie-direction-inheritance logic already consumes.
+-- Sub-measure splitting (a duration that doesn't cross a barline but
+-- still obscures the beat structure within one measure) is a separate,
+-- narrower engraving nicety this doesn't attempt - see this file's
+-- existing tie-inference comment for why exact beat-perfect splitting
+-- everywhere is out of scope.
 
 local config = require('config')
 
@@ -107,17 +134,45 @@ end
 -- repeated fast notes are the more common and more disruptive case.
 --
 -- Returns a render model: list of
---   { tick, x, duration_ticks, notes = {..., tied_from_prev = bool} }
+--   { tick, x, duration_ticks, notes = {..., tied_from_prev, tied_to_next} }
 -- Only x differs in meaning per staff; y is each drawer's own concern.
 function M.compute(events, opts)
   opts = opts or {}
   local measure_width = opts.measure_width
   local beat_ticks_lookup = opts.beat_ticks_lookup or function() return M.PPQ_PER_QUARTER end
+  local measure_ticks = opts.measure_ticks
   local min_gap = config.layout.min_gap
   local x = config.layout.left_margin
 
   local result = {}
   local prev_by_string = {} -- string index -> last note seen on that string, for tie detection
+
+  -- Barline ticks strictly between tick_start and tick_end, in order - the
+  -- boundaries a notated span running from tick_start through tick_end
+  -- would cross. Excludes tick_start itself even if it happens to land
+  -- exactly on a barline (starting AT a barline isn't "crossing" it).
+  local function crossings_within(tick_start, tick_end)
+    local out = {}
+    if not measure_ticks then return out end
+    for i = 1, #measure_ticks do
+      local b = measure_ticks[i]
+      if b > tick_start and b < tick_end then
+        out[#out + 1] = b
+      end
+    end
+    return out
+  end
+
+  -- Appends one render-model entry (advancing x by its own duration-class
+  -- width) and returns it, so the caller can chain barline-split segments.
+  local function emit(tick, duration_ticks, notes)
+    local entry = { tick = tick, x = x, duration_ticks = duration_ticks, notes = notes }
+    result[#result + 1] = entry
+    local content_width = measure_width and measure_width(entry) or 0
+    local step_width = math.max(width_for_duration(duration_ticks), content_width + min_gap)
+    x = x + step_width
+    return entry
+  end
 
   for e = 1, #events do
     local event = events[e]
@@ -172,12 +227,35 @@ function M.compute(events, opts)
       end
     end
 
-    local entry = { tick = event.tick, x = x, duration_ticks = duration_ticks, notes = notes }
-    result[e] = entry
+    -- Split across any barlines this notated span crosses (see this
+    -- file's header) - the ordinary, non-crossing case is just one
+    -- segment covering the whole duration, identical to before.
+    local crossings = crossings_within(event.tick, event.tick + duration_ticks)
+    local seg_start = event.tick
+    local seg_notes = notes
+    for c = 1, #crossings + 1 do
+      local seg_end = crossings[c] or (event.tick + duration_ticks)
+      local is_last = c > #crossings
 
-    local content_width = measure_width and measure_width(entry) or 0
-    local step_width = math.max(width_for_duration(duration_ticks), content_width + min_gap)
-    x = x + step_width
+      if not is_last then
+        for i = 1, #seg_notes do seg_notes[i].tied_to_next = true end
+      end
+
+      emit(seg_start, seg_end - seg_start, seg_notes)
+
+      if not is_last then
+        local next_notes = {}
+        for i = 1, #seg_notes do
+          local copy = {}
+          for k, v in pairs(seg_notes[i]) do copy[k] = v end
+          copy.tied_from_prev = true
+          copy.tied_to_next = false
+          next_notes[i] = copy
+        end
+        seg_notes = next_notes
+        seg_start = seg_end
+      end
+    end
   end
 
   return result

@@ -264,9 +264,14 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
       -- Let ring: this note's actual MIDI sustain outlasts its own
       -- written position (still audible when the next event starts,
       -- whatever string/pitch it turns out to be) - see this file's
-      -- header. Same cross-system limitation as draw_notation.lua's
-      -- version: only checked against the immediately following event.
-      if note.string and note.endppq and render_model[i + 1] and note.endppq > render_model[i + 1].tick then
+      -- header. Excludes tied_to_next (layout_engine.compute's barline-
+      -- crossing split) so a barline-split note's tie curve doesn't also
+      -- get a redundant let-ring line - see draw_notation.lua's matching
+      -- guard for the full reasoning. Same cross-system limitation as
+      -- draw_notation.lua's version: only checked against the immediately
+      -- following event.
+      if note.string and note.endppq and not note.tied_to_next
+          and render_model[i + 1] and note.endppq > render_model[i + 1].tick then
         local ring_end_x = origin_x + layout_engine.x_for_tick(render_model, note.endppq)
         draw_let_ring_line(draw_list, label_end_x + LET_RING_GAP, ring_end_x, y)
       end

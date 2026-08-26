@@ -16,7 +16,11 @@
 -- meter changes) on the notation staff, and a "TAB" label on the tab
 -- staff. Beam grouping and tie inference are meter-aware throughout
 -- (notation_model.beat_ticks_lookup), not pinned to whatever meter was
--- active at the take's start - measure_boundaries already walked
+-- active at the take's start. A single held note/chord that crosses one or
+-- more barlines is automatically split into tied segments at each
+-- boundary (layout_engine.compute, given cached_measure_ticks) - standard
+-- engraving practice, since a note is never drawn straddling a barline as
+-- one symbol. measure_boundaries already walked
 -- TimeMap_GetMeasureInfo per measure for barlines, so per-measure meter
 -- and tempo come from that same walk. The whole thing wraps into multiple systems
 -- (layout_engine.wrap_into_systems) when content is wider than the
@@ -212,6 +216,7 @@ local function main()
       cached_render_model = layout_engine.compute(assigned_events, {
         measure_width = draw_tab.make_measurer(ctx),
         beat_ticks_lookup = notation_model.beat_ticks_lookup(cached_measure_ticks, cached_measure_info),
+        measure_ticks = cached_measure_ticks,
       })
     else
       cached_render_model = nil

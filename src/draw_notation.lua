@@ -720,12 +720,21 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
       -- separate MIDI note, already shown by the tie arc above) - this is
       -- one note's sustain genuinely overlapping a DIFFERENT note's onset,
       -- the common "open chord ringing under a moving line" guitar case.
+      -- Excludes tied_to_next (layout_engine.compute's barline-crossing
+      -- split - see its header) for the same reason: render_model[i + 1]
+      -- there is the NEXT TIED SEGMENT OF THIS SAME NOTE, not a different
+      -- one, and note.endppq (the note's one true, unsplit end) is always
+      -- past that segment's own tick by construction - without this
+      -- guard, every non-final segment of a barline-split note would get
+      -- a spurious let-ring line alongside the tie curve that already
+      -- shows the same continuation.
       -- Only checked against the immediately following event, so a note
       -- ringing across a system-wrap boundary won't get a marking - out
       -- of scope for now, the same class of limitation as this file's
       -- other cross-system simplifications (rests, likewise, only look
       -- within their own system's slice of the render model).
-      if note.string and note.endppq and render_model[i + 1] and note.endppq > render_model[i + 1].tick then
+      if note.string and note.endppq and not note.tied_to_next
+          and render_model[i + 1] and note.endppq > render_model[i + 1].tick then
         local ring_end_x = origin_x + layout_engine.x_for_tick(render_model, note.endppq)
         draw_let_ring_line(draw_list, actual_x + radius + LET_RING_GAP, ring_end_x, y, COLOR_LET_RING)
       end
