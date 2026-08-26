@@ -588,7 +588,21 @@ end
 -- logic, and centers it using the returned tick (already the measure's
 -- own midpoint for this case, not its start). Omitting measure_ticks
 -- reproduces this function's pre-existing behavior exactly (no splitting,
--- no whole-measure shorthand).
+-- no whole-measure shorthand) - it also disables the trailing-silence
+-- check below, which needs measure_ticks' own final boundary to know
+-- where to stop.
+--
+-- Trailing silence: the main loop below only ever looks BETWEEN two
+-- consecutive render_model events, so silence after the very LAST event
+-- - with nothing following it in this render_model at all - fell through
+-- undetected (a real, once-live bug: a measure whose final beats were
+-- silent, e.g. notes on beats 1-2 of a 4/4 bar only, rendered with no
+-- rest at all for beats 3-4, since there was no "next event" to compare
+-- against). Fixed by treating measure_ticks' own final boundary - each
+-- caller's own closing barline, whether that's the true end of the whole
+-- piece (the last system) or just this system's own closing/next-
+-- system's-opening boundary (any earlier system) - as an implicit
+-- trailing "next event" position, checked once after the main loop.
 -- Returns a list of {tick, duration_ticks, whole_measure}.
 function M.detect_rests(render_model, leading_tick, measure_ticks)
   local rests = {}
@@ -647,6 +661,22 @@ function M.detect_rests(render_model, leading_tick, measure_ticks)
     local next_tick = render_model[i + 1].tick
     if latest_end and next_tick > latest_end then
       add_gap(latest_end, next_tick - latest_end)
+    end
+  end
+
+  -- Trailing silence after the LAST event, up through this caller's own
+  -- final measure boundary - see this function's header. Mirrors the
+  -- pairwise loop above exactly, just using measure_ticks' own last entry
+  -- in place of a "next event" that doesn't exist.
+  if measure_ticks and #measure_ticks > 0 and #render_model > 0 then
+    local last_notes = render_model[#render_model].notes
+    local latest_end = nil
+    for j = 1, #last_notes do
+      if not latest_end or last_notes[j].endppq > latest_end then latest_end = last_notes[j].endppq end
+    end
+    local trailing_boundary = measure_ticks[#measure_ticks]
+    if latest_end and trailing_boundary > latest_end then
+      add_gap(latest_end, trailing_boundary - latest_end)
     end
   end
 
