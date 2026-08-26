@@ -53,6 +53,16 @@
 -- musically-wrong string, since MIDI has no native string field and
 -- REAPER's own piano roll has no way to set one. Duration changes,
 -- insert/delete, and dragging remain REAPER-piano-roll-only.
+--
+-- Score header (title/tempo marking/composer/arranger, ui_chrome.lua's
+-- "Score Info" section): drawn once above the very first system, like a
+-- real printed score's title page - title centered and enlarged, composer/
+-- arranger stacked top-right, tempo marking stacked above the existing
+-- per-measure BPM readout at the piece's start only. All blank by default
+-- (no reserved space at all) so an untouched take looks unchanged. title/
+-- tempo_marking are piece-specific and per-take only; composer/arranger
+-- also fall back to a global "last used" value, same convenience
+-- instrument/tuning already have (see config.lua/ui_chrome.lua headers).
 
 local SCRIPT_TITLE = "Guitar Tab/Notation Viewer"
 
@@ -93,6 +103,20 @@ local BOTTOM_MARGIN = 10 -- px reserved below the last system, so the bottom tab
 local MEASURE_LABEL_ABOVE_GAP = 14 -- px above the notation staff's top line where the measure-number label sits
 local TEMPO_LABEL_ABOVE_GAP = 28 -- px above the notation staff's top line where the tempo label sits (above the measure-number label)
 local TOP_MARGIN = 32 -- px reserved above the first system, so its tempo/measure-number labels don't clip against the window's top edge
+
+-- Score header (title/composer/arranger, config.lua's header) - drawn once
+-- above the very first system, like a real printed score's title page.
+-- Reserved space is entirely conditional (0 if none of these are set), so
+-- an untouched take looks exactly like it did before this feature existed.
+local TITLE_FONT_SCALE = 1.8 -- relative to the panel's base text size
+local SCORE_INFO_LINE_GAP = 2 -- px between the stacked composer/arranger lines
+local SCORE_HEADER_BOTTOM_GAP = 16 -- px between the header block and the first system's own reserved area
+-- Extra space above the usual tempo-label slot for the free-text tempo
+-- marking (e.g. "Andante"), shown only at the piece's very first tempo
+-- label, stacked above the existing "120 BPM" readout rather than
+-- replacing it - both are useful (one's the traditional score marking,
+-- the other's the exact number that came from REAPER's own tempo map).
+local TEMPO_MARKING_ABOVE_GAP = 14
 
 local ctx = reaper.ImGui_CreateContext(SCRIPT_TITLE)
 
@@ -243,6 +267,57 @@ local function main()
   local max_width = math.max(window_w - WINDOW_CHROME_RESERVE - config.layout.right_margin, MIN_SYSTEM_WIDTH)
   local systems = layout_engine.wrap_into_systems(cached_render_model, cached_measure_ticks, max_width)
 
+  -- Score header (title/composer/arranger/tempo marking) - see config.lua's
+  -- header for why these are blank by default. header_height/top_reserve
+  -- have to be computed before the systems loop below, since every
+  -- system's own vertical position is shifted down to make room; the
+  -- actual header TEXT is drawn afterward (needs max_width, already
+  -- computed above, for centering/right-alignment - drawing before or
+  -- after the systems loop makes no visual difference, ReaImGui has no
+  -- z-ordering concern here since nothing overlaps).
+  local has_title = config.title and config.title ~= ""
+  local has_composer = config.composer and config.composer ~= ""
+  local has_arranger = config.arranger and config.arranger ~= ""
+  local has_tempo_marking = config.tempo_marking and config.tempo_marking ~= ""
+
+  local base_font_size = reaper.ImGui_GetFontSize(ctx)
+  local header_height = 0
+  if has_title or has_composer or has_arranger then
+    local title_h = has_title and (base_font_size * TITLE_FONT_SCALE) or 0
+    local side_h = 0
+    if has_composer then
+      local _, h = reaper.ImGui_CalcTextSize(ctx, config.composer)
+      side_h = side_h + h
+    end
+    if has_arranger then
+      local _, h = reaper.ImGui_CalcTextSize(ctx, "arr. " .. config.arranger)
+      side_h = side_h + (has_composer and (h + SCORE_INFO_LINE_GAP) or h)
+    end
+    header_height = math.max(title_h, side_h) + SCORE_HEADER_BOTTOM_GAP
+  end
+  local top_reserve = TOP_MARGIN + header_height + (has_tempo_marking and TEMPO_MARKING_ABOVE_GAP or 0)
+
+  if has_title then
+    local title_size = base_font_size * TITLE_FONT_SCALE
+    local scale = title_size / base_font_size
+    local w = reaper.ImGui_CalcTextSize(ctx, config.title)
+    local title_x = origin_x + (max_width - w * scale) / 2
+    reaper.ImGui_DrawList_AddTextEx(draw_list, nil, title_size, title_x, origin_y, config.color_fg, config.title)
+  end
+  do
+    local side_y = origin_y
+    if has_composer then
+      local w, h = reaper.ImGui_CalcTextSize(ctx, config.composer)
+      reaper.ImGui_DrawList_AddText(draw_list, origin_x + max_width - w, side_y, config.color_fg, config.composer)
+      side_y = side_y + h + SCORE_INFO_LINE_GAP
+    end
+    if has_arranger then
+      local arranger_text = "arr. " .. config.arranger
+      local w = reaper.ImGui_CalcTextSize(ctx, arranger_text)
+      reaper.ImGui_DrawList_AddText(draw_list, origin_x + max_width - w, side_y, color_dim, arranger_text)
+    end
+  end
+
   local notation_above, notation_below = draw_notation.vertical_extents()
   local tab_staff_height = (#config.tuning - 1) * config.layout.line_height
   local system_pitch = notation_above + notation_below + config.layout.staff_gap + tab_staff_height + config.layout.system_gap
@@ -265,7 +340,7 @@ local function main()
 
   for s = 1, #systems do
     local system = systems[s]
-    local sys_top_local_y = TOP_MARGIN + (s - 1) * system_pitch
+    local sys_top_local_y = top_reserve + (s - 1) * system_pitch
     local sys_origin_y = origin_y + sys_top_local_y
     local middle_c_y = sys_origin_y + notation_above
 
@@ -316,13 +391,24 @@ local function main()
       local x = origin_x + system.barline_x[j] - BARLINE_NOTE_GAP
       reaper.ImGui_DrawList_AddText(draw_list, x, bar_top - MEASURE_LABEL_ABOVE_GAP, color_dim, label)
 
-      -- Tempo marking: at the very first measure of the piece, and
+      -- Tempo (BPM) label: at the very first measure of the piece, and
       -- wherever it changes from the previous measure - not on every
       -- measure, which would just be clutter.
       local prev_measure_info = cached_measure_info[global_idx - 1]
       if global_idx == 1 or not prev_measure_info or prev_measure_info.tempo ~= measure_info.tempo then
         local tempo_label = measure_info.tempo .. " BPM"
         reaper.ImGui_DrawList_AddText(draw_list, x, bar_top - TEMPO_LABEL_ABOVE_GAP, color_dim, tempo_label)
+
+        -- The user's own descriptive tempo marking (e.g. "Andante",
+        -- config.tempo_marking) - only at the piece's very first tempo
+        -- label, stacked above the BPM readout, standard-notation style.
+        -- Not repeated at later tempo changes since it describes the
+        -- piece's overall character at the start, not a per-section marking.
+        if global_idx == 1 and has_tempo_marking then
+          reaper.ImGui_DrawList_AddText(
+            draw_list, x, bar_top - TEMPO_LABEL_ABOVE_GAP - TEMPO_MARKING_ABOVE_GAP, config.color_fg,
+            config.tempo_marking)
+        end
       end
     end
 
@@ -337,7 +423,7 @@ local function main()
 
   note_editor.end_frame(ctx, take)
 
-  local total_height = TOP_MARGIN + (#systems * system_pitch - config.layout.system_gap) + BOTTOM_MARGIN
+  local total_height = top_reserve + (#systems * system_pitch - config.layout.system_gap) + BOTTOM_MARGIN
 
   -- Auto-scroll during playback now follows vertically (which system is
   -- active), not horizontally - wrapping already keeps every system

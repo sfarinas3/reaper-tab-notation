@@ -1,8 +1,11 @@
--- Settings panel: instrument (a one-click "swap to a completely different
--- instrument" preset - currently Guitar/Shamisen, see INSTRUMENTS), string
--- count, tuning (per-string note names, or a preset), capo, and max fret
--- in one collapsible "Instrument Settings" section, key signature in its
--- own separate "Key Signature" section, and a "Colors" section with just
+-- Settings panel: score header info (title, tempo marking, composer,
+-- arranger - main.lua draws these above the first system like a real
+-- printed score's title page, see its header) in a "Score Info" section;
+-- instrument (a one-click "swap to a completely different instrument"
+-- preset - currently Guitar/Shamisen, see INSTRUMENTS), string count,
+-- tuning (per-string note names, or a preset), capo, and max fret in one
+-- collapsible "Instrument Settings" section, key signature in its own
+-- separate "Key Signature" section, and a "Colors" section with just
 -- two options - background and one foreground "ink" color covering
 -- everything else (noteheads, stems, text, staff/tab lines) - rather than
 -- per-element colors, at least for now (see color_util.lua for how
@@ -237,6 +240,12 @@ function M.save_persisted(cfg)
   -- there's no save_for_take counterpart for them.
   reaper.SetExtState(EXT_SECTION, "color_bg", tostring(cfg.color_bg), true)
   reaper.SetExtState(EXT_SECTION, "color_fg", tostring(cfg.color_fg), true)
+  -- Composer/arranger are the one "last used globally" convenience that
+  -- makes sense for score-header info - see config.lua's header. title/
+  -- tempo_marking are piece-specific and deliberately have no global
+  -- fallback, so they're saved only in save_for_take, below.
+  reaper.SetExtState(EXT_SECTION, "composer", cfg.composer or "", true)
+  reaper.SetExtState(EXT_SECTION, "arranger", cfg.arranger or "", true)
 end
 
 -- Applies any persisted tuning/capo over config's defaults. Call once at
@@ -291,6 +300,16 @@ function M.load_persisted(cfg)
     if n then cfg.color_fg = n end
   end
 
+  local composer_str = reaper.GetExtState(EXT_SECTION, "composer")
+  if composer_str and composer_str ~= "" then
+    cfg.composer = composer_str
+  end
+
+  local arranger_str = reaper.GetExtState(EXT_SECTION, "arranger")
+  if arranger_str and arranger_str ~= "" then
+    cfg.arranger = arranger_str
+  end
+
   apply_key_margin(cfg)
 end
 
@@ -308,6 +327,17 @@ end
 -- field, since P_EXT only holds a single string per key per take (not a
 -- whole namespaced section the way ExtState's section+key model does).
 local TAKE_EXT_KEY = "P_EXT:reaper-tab-notation"
+
+-- Score-header fields (config.lua's header) get their OWN separate P_EXT
+-- keys instead of joining TAKE_EXT_KEY's packed string above: they're free
+-- text a user might type a ";" or "=" into, which the packed format's own
+-- delimiters can't safely round-trip. A dedicated key per field sidesteps
+-- that entirely - no escaping needed since each one is just its own raw
+-- string.
+local TAKE_EXT_TITLE = "P_EXT:reaper-tab-notation-title"
+local TAKE_EXT_COMPOSER = "P_EXT:reaper-tab-notation-composer"
+local TAKE_EXT_ARRANGER = "P_EXT:reaper-tab-notation-arranger"
+local TAKE_EXT_TEMPO = "P_EXT:reaper-tab-notation-tempo"
 
 local function serialize_for_take(cfg)
   local tuning_parts = {}
@@ -350,6 +380,10 @@ end
 function M.save_for_take(take, cfg)
   if not take then return end
   reaper.GetSetMediaItemTakeInfo_String(take, TAKE_EXT_KEY, serialize_for_take(cfg), true)
+  reaper.GetSetMediaItemTakeInfo_String(take, TAKE_EXT_TITLE, cfg.title or "", true)
+  reaper.GetSetMediaItemTakeInfo_String(take, TAKE_EXT_COMPOSER, cfg.composer or "", true)
+  reaper.GetSetMediaItemTakeInfo_String(take, TAKE_EXT_ARRANGER, cfg.arranger or "", true)
+  reaper.GetSetMediaItemTakeInfo_String(take, TAKE_EXT_TEMPO, cfg.tempo_marking or "", true)
 end
 
 -- Loads take's own settings onto cfg, overriding whatever's currently
@@ -363,11 +397,35 @@ end
 -- anything, for the caller's own cache-invalidation signal.
 function M.load_for_take(take, cfg)
   if not take then return false end
+  local changed = false
+
   local ok, str = reaper.GetSetMediaItemTakeInfo_String(take, TAKE_EXT_KEY, "", false)
-  if not ok or str == "" then return false end
-  deserialize_for_take(cfg, str)
-  apply_key_margin(cfg)
-  return true
+  if ok and str ~= "" then
+    deserialize_for_take(cfg, str)
+    apply_key_margin(cfg)
+    changed = true
+  end
+
+  -- title/tempo_marking are piece-specific (see config.lua's header) - a
+  -- take with none saved gets a blank one, not whatever the previously
+  -- active take happened to show, unlike the "leave it alone" rule
+  -- everything else in this function follows. Read unconditionally (not
+  -- gated behind the packed key above) since a user might set a title
+  -- without ever touching instrument/tuning.
+  local ok_title, title = reaper.GetSetMediaItemTakeInfo_String(take, TAKE_EXT_TITLE, "", false)
+  cfg.title = (ok_title and title) or ""
+  local ok_tempo, tempo_marking = reaper.GetSetMediaItemTakeInfo_String(take, TAKE_EXT_TEMPO, "", false)
+  cfg.tempo_marking = (ok_tempo and tempo_marking) or ""
+
+  -- composer/arranger DO inherit whatever's already active (the global
+  -- "last used" fallback from load_persisted, or another take's value) if
+  -- this take never set its own - see config.lua's header for why.
+  local ok_c, composer = reaper.GetSetMediaItemTakeInfo_String(take, TAKE_EXT_COMPOSER, "", false)
+  if ok_c and composer ~= "" then cfg.composer = composer end
+  local ok_a, arranger = reaper.GetSetMediaItemTakeInfo_String(take, TAKE_EXT_ARRANGER, "", false)
+  if ok_a and arranger ~= "" then cfg.arranger = arranger end
+
+  return changed
 end
 
 -- Per-string InputText buffers, keyed by string index, so a note name
@@ -386,9 +444,12 @@ local function sync_buffers(tuning)
   end
 end
 
--- Draws the settings panel (instrument preset, string count, tuning preset
--- dropdown, per-string note-name fields, capo, max fret, key signature),
--- plus an always-visible instrument/tuning/key summary right below both
+-- Draws the settings panel: score header info (title/tempo marking/
+-- composer/arranger, see config.lua's header) in its own "Score Info"
+-- section, first since it's the score's own identity; then instrument
+-- preset, string count, tuning preset dropdown, per-string note-name
+-- fields, capo, max fret, key signature; plus an always-visible
+-- instrument/tuning/key summary right below both
 -- dropdowns (M.instrument_summary for the first two lines, a third "Key: "
 -- line reusing key_label so its wording always matches the Key Signature
 -- dropdown's own options) - outside either collapsible section, so it
@@ -406,6 +467,32 @@ function M.draw(ctx, cfg, take)
   end
 
   local changed = false
+
+  if reaper.ImGui_CollapsingHeader(ctx, "Score Info", nil) then
+    local rv_title, new_title = reaper.ImGui_InputText(ctx, "Title", cfg.title or "")
+    if rv_title then
+      cfg.title = new_title
+      changed = true
+    end
+
+    local rv_tempo, new_tempo = reaper.ImGui_InputText(ctx, "Tempo Marking", cfg.tempo_marking or "")
+    if rv_tempo then
+      cfg.tempo_marking = new_tempo
+      changed = true
+    end
+
+    local rv_composer, new_composer = reaper.ImGui_InputText(ctx, "Composer", cfg.composer or "")
+    if rv_composer then
+      cfg.composer = new_composer
+      changed = true
+    end
+
+    local rv_arranger, new_arranger = reaper.ImGui_InputText(ctx, "Arranger", cfg.arranger or "")
+    if rv_arranger then
+      cfg.arranger = new_arranger
+      changed = true
+    end
+  end
 
   if reaper.ImGui_CollapsingHeader(ctx, "Instrument Settings", nil) then
     cfg.instrument = cfg.instrument or "Guitar"

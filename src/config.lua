@@ -36,6 +36,23 @@ M.max_fret = 17
 -- behavior, so it stays the default.
 M.key_count = 0
 
+-- Score header info (title/composer/arranger/tempo_marking), drawn by
+-- main.lua above the first system like a real printed score's title page -
+-- see ui_chrome.lua's "Score Info" section for the editable fields. All
+-- default to blank (no header drawn at all) so an untouched take looks
+-- exactly like this app did before this feature existed. title and
+-- tempo_marking are piece-specific (e.g. "Sakura" / "Andante") and only
+-- ever come from the CURRENT take's own saved P_EXT data, never a global
+-- fallback - see ui_chrome.lua's load_for_take. composer/arranger are
+-- person-specific and DO fall back to a global "last used" ExtState value,
+-- the same convenience save_persisted/load_persisted already give
+-- instrument/tuning, since one user's own transcriptions usually share the
+-- same composer/arranger.
+M.title = ""
+M.composer = ""
+M.arranger = ""
+M.tempo_marking = ""
+
 -- Panel colors (0xRRGGBBAA, ReaImGui's packed format), user-editable via
 -- ui_chrome.lua's "Colors" section: color_bg is the window background,
 -- color_fg is the single "ink" color covering noteheads/stems/text/staff
