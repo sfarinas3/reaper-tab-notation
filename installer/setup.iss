@@ -1,7 +1,7 @@
 ; Inno Setup script for the Guitar Tab/Notation Viewer REAPER script.
 ;
 ; What this does: copies main.lua + install_toolbar_button.lua + src/*.lua
-; + assets/* into the current Windows user's REAPER Scripts folder (no
+; into the current Windows user's REAPER Scripts folder (no
 ; admin rights needed - it's a per-user AppData install, same folder
 ; deploy.ps1 already targets for local dev), AND drops pinned copies of
 ; the ReaImGui/ReaPack extension DLLs (vendor\*.dll) into REAPER's own
@@ -82,7 +82,6 @@ InfoAfterFile=POST_INSTALL.txt
 Source: "..\main.lua"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\install_toolbar_button.lua"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\src\*.lua"; DestDir: "{app}\src"; Flags: ignoreversion recursesubdirs
-Source: "..\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs
 ; ReaImGui/ReaPack extensions - see this file's header for why these are
 ; bundled DLL drops into UserPlugins rather than a ReaPack-mediated
 ; install. onlyifdoesntexist: never overwrite a copy the user (or

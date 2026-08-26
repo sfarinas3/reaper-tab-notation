@@ -9,11 +9,10 @@ does the file-copying REAPER itself requires.
 ## Current approach: Inno Setup installer
 
 `installer/setup.iss` builds a single `ReaperTabNotation-Setup.exe` that
-copies `main.lua`, `install_toolbar_button.lua`, `src/*.lua`, and
-`assets/*` into the current user's
-`%APPDATA%\REAPER\Scripts\reaper-tab-notation\` (the same folder
-`deploy.ps1` targets for local dev). It's a per-user install - no admin
-rights, no UAC prompt.
+copies `main.lua`, `install_toolbar_button.lua`, and `src/*.lua` into the
+current user's `%APPDATA%\REAPER\Scripts\reaper-tab-notation\` (the same
+folder `deploy.ps1` targets for local dev). It's a per-user install - no
+admin rights, no UAC prompt.
 
 It also installs ReaPack/ReaImGui (REAPER's own dependency) itself: pinned
 copies of `reaper_imgui64.dll` and `reaper_reapack64.dll` live in
