@@ -1,17 +1,16 @@
-Installation complete. Three things to do before it'll show up in REAPER:
+Installation complete. ReaImGui and ReaPack (REAPER's own extensions this
+script needs) were installed automatically - if REAPER was open during
+setup, restart it now so they load.
 
-1. If you haven't already, install ReaPack and ReaImGui:
-   - ReaPack: https://reapack.com/
-   - Then in REAPER: Extensions > ReaPack > Browse packages, search for
-     "ReaImGui", and install it. Restart REAPER afterward.
+Two things left to do before the viewer shows up in REAPER:
 
-2. Load the script as a REAPER action (one-time):
+1. Load the script as a REAPER action (one-time):
    - In REAPER: Actions > Show Action List > New Action > Load ReaScript
    - Select main.lua from the folder you just installed to.
    - Run it from the Action List whenever you want the viewer - it'll
      dock like any other REAPER window.
 
-3. Add a one-click toolbar button (one-time, optional but recommended):
+2. Add a one-click toolbar button (one-time, optional but recommended):
    - In REAPER: Actions > Show Action List > New Action > Load ReaScript
    - Select install_toolbar_button.lua from the same folder, then run it
      from the Action List.

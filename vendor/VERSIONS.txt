@@ -1,0 +1,20 @@
+Pinned REAPER extension DLLs bundled by installer/setup.iss.
+
+reaper_imgui64.dll
+  Source:  cfillion/reaimgui
+  Version: v0.10.0.5
+  From:    https://github.com/cfillion/reaimgui/releases/download/v0.10.0.5/reaper_imgui-x64.dll
+  Renamed from reaper_imgui-x64.dll to reaper_imgui64.dll (REAPER's own
+  UserPlugins naming convention - REAPER doesn't require this exact name
+  to load a plugin, but it matches what ReaPack itself would name it).
+
+reaper_reapack64.dll
+  Source:  cfillion/reapack
+  Version: v1.2.6
+  From:    https://github.com/cfillion/reapack/releases/download/v1.2.6/reaper_reapack-x64.dll
+  Renamed from reaper_reapack-x64.dll to reaper_reapack64.dll, same reason.
+
+To update: download the new release's *-x64.dll asset from the
+project's GitHub releases page, rename it as above, replace the file
+here, and update this file's version/URL. No other changes needed -
+setup.iss references these two filenames directly.
