@@ -412,6 +412,46 @@ function M.duration_dash_count(duration_ticks)
   return 4
 end
 
+-- Whether duration_ticks represents a DOTTED standard value (1.5x a plain
+-- note/rest duration - e.g. a dotted half is a half plus half of a half,
+-- 3 beats) rather than a plain one. Draw_notation.lua uses this for both
+-- noteheads and rests - draw_tab.lua's bunkafu dashes (shamisen) don't
+-- have a dotted concept of their own, so this is notation-staff-only.
+--
+-- Classification is nearest-neighbor among three candidates: the largest
+-- plain standard value at or below duration_ticks (floor), that value's
+-- own dotted (1.5x) equivalent, and the next plain value up (ceil) - not
+-- just "closer to dotted than to floor," since a duration close enough to
+-- ceil (e.g. a barely-short half note) should read as that longer plain
+-- value, not as a dotted quarter. This mirrors how the rest of this file
+-- already accepts nearest-neighbor/greedy classification for imprecise
+-- real MIDI timing (see M.detect_rests' own comment) rather than
+-- requiring exact tick matches.
+function M.is_dotted_duration(duration_ticks)
+  -- Independent of config.layout.duration_classes (that table's pixel
+  -- widths serve a different purpose, spacing interpolation, and its
+  -- 64th/32nd extremes aren't relevant to dot detection).
+  local quarter = config.layout.ppq_per_quarter
+  local ticks = { quarter / 8, quarter / 4, quarter / 2, quarter, quarter * 2, quarter * 4 }
+  local floor_ticks = ticks[1]
+  local ceil_ticks = nil
+  for _, t in ipairs(ticks) do
+    if t <= duration_ticks then
+      floor_ticks = t
+    elseif not ceil_ticks then
+      ceil_ticks = t
+    end
+  end
+  ceil_ticks = ceil_ticks or floor_ticks * 2
+  local dotted_ticks = floor_ticks * 1.5
+
+  local d_floor = math.abs(duration_ticks - floor_ticks)
+  local d_dotted = math.abs(duration_ticks - dotted_ticks)
+  local d_ceil = math.abs(duration_ticks - ceil_ticks)
+
+  return d_dotted < d_floor and d_dotted <= d_ceil
+end
+
 -- Groups consecutive beamable events (duration shorter than a quarter
 -- note) that fall within the same beat into beam groups. Meter-aware via
 -- beat_ticks_lookup (M.beat_ticks_lookup) rather than one fixed beat

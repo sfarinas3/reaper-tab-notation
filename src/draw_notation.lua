@@ -40,6 +40,16 @@
 -- other visual cue distinguishing durations, a whole note's missing stem,
 -- doesn't help tell a half from a quarter since both have one.
 --
+-- Augmentation dots (dotted notes/rests - notation_model.is_dotted_
+-- duration, nearest-neighbor classified against the standard note-value
+-- ticks, same "accept imprecise real MIDI timing" approach the rest of
+-- this file's duration classification already uses): a small filled dot
+-- to the right of the notehead or rest glyph. Placed at the glyph's own
+-- y rather than nudged into the nearest staff space when it would
+-- otherwise land on a line - a real engraving refinement this skips, same
+-- guaranteed-simple-over-fully-faithful choice as the plain-text
+-- accidentals and stand-in rest glyphs elsewhere in this file.
+--
 -- A note with no valid string/fret (fret_heuristic couldn't place it
 -- within the instrument's range) gets an X notehead instead of a filled
 -- circle - most often this represents a string mute/scrape rather than a
@@ -135,6 +145,8 @@ local LEDGER_OVERHANG = 3 -- px a ledger line extends past the notehead on each 
 local ACCIDENTAL_GAP = 3 -- px between an accidental symbol and the notehead it applies to
 local TIE_ARC_HEIGHT = 6 -- px the tie curve rises above the notes it connects
 local REST_RECT_W, REST_RECT_H = 8, 4 -- whole/half rest rectangle size
+local DOT_RADIUS = 1.5 -- px, an augmentation dot (dotted note/rest)
+local DOT_GAP = 4 -- px between a notehead/rest glyph's own right edge and its dot
 local BRACE_X_OFFSET = 6 -- px left of the staff lines' start where the brace sits
 local BRACE_BULGE = 8 -- px further left the brace bulges at its midpoint
 local CLEF_X_OFFSET = 4 -- px right of the staff start where the clef sits
@@ -735,6 +747,21 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
         reaper.ImGui_DrawList_AddLine(draw_list, actual_x - radius, y + radius, actual_x + radius, y - radius, COLOR_NOTE, 1.5)
       end
 
+      -- Augmentation dot (dotted note - a dotted half is worth 3 beats,
+      -- half its own value again on top of the plain half): standard
+      -- notation practice for any note whose written value is 1.5x a
+      -- plain one. Placed at the notehead's own y - real engraving practice
+      -- nudges a dot that would otherwise land ON a staff line up into the
+      -- space above, but this app already takes similar guaranteed-simple
+      -- shortcuts elsewhere (plain-text accidentals, stand-in rest glyphs)
+      -- rather than replicating every fine engraving rule, so this skips
+      -- that nudge too. event.duration_ticks (not the note's own true
+      -- endppq) is what's actually notated here, same value everything
+      -- else about this note's shape/flags already reads.
+      if notation_model.is_dotted_duration(event.duration_ticks) then
+        reaper.ImGui_DrawList_AddCircleFilled(draw_list, actual_x + radius + DOT_GAP, y, DOT_RADIUS, COLOR_NOTE, 0)
+      end
+
       -- Let ring: this note's actual MIDI sustain outlasts its own
       -- written position - i.e. it's still audible when the NEXT event
       -- starts, whatever string/pitch that next event turns out to be.
@@ -811,6 +838,15 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
   for _, rest in ipairs(rests) do
     local x = origin_x + layout_engine.x_for_tick(render_model, rest.tick)
     draw_rest(draw_list, x, rest_y, rest_shape(rest.duration_ticks))
+    -- Augmentation dot (dotted rest) - same standard-notation rule as a
+    -- dotted note (see the notehead dot's own comment), just placed clear
+    -- of the widest rest glyph (the whole/half rectangle, REST_RECT_W
+    -- wide) rather than hugging each shape's own narrower actual width -
+    -- one fixed offset for all shapes, the same kind of simplification
+    -- this file's rest glyphs already are.
+    if notation_model.is_dotted_duration(rest.duration_ticks) then
+      reaper.ImGui_DrawList_AddCircleFilled(draw_list, x + REST_RECT_W / 2 + DOT_GAP, rest_y, DOT_RADIUS, COLOR_NOTE, 0)
+    end
   end
 
   -- Pass 2: stem direction, finalized once per group (or per lone event)
