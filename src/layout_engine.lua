@@ -146,14 +146,43 @@ end
 -- rhythms), which is exactly what a genuine tie almost never needs: a
 -- tie exists specifically because a sustained duration can't be written
 -- as one symbol when it crosses a beat boundary - that's *why* notation
--- splits it into two tied pieces. Two independently-valid-duration notes
--- sharing a pitch within the same beat essentially never need a tie for
--- that reason, so the heuristic here only infers one when the join point
--- actually crosses a beat boundary. Trade-off: this can miss a genuine
--- intentional tie between two notes that both fall within one beat
--- (uncommon, but it does happen) - accepted since false positives on
--- repeated fast notes are the more common and more disruptive case.
+-- splits it into two tied pieces.
 --
+-- Crossing a beat boundary alone is NOT enough, though - a real, once-live
+-- bug: for any note whose own duration is a whole number of beats (a
+-- quarter, a half, a dotted half, a whole note...), EVERY back-to-back
+-- same-pitch repetition necessarily starts on a fresh beat, since the
+-- previous one's own length already lands exactly on one. A run of three
+-- separately-attacked dotted-half notes at the same pitch (each a
+-- complete, legally-notatable 3-beat value on its own, needing no tie at
+-- all) was getting flagged as two ties on that basis alone. The real
+-- distinguishing question is whether PREV already stands as one complete,
+-- nameable note value by itself (has_clean_duration, checked against
+-- prev's own raw duration, plain or dotted, with a small tolerance for
+-- imprecise real MIDI timing) - if it does, there's no rhythmic need to
+-- tie it to anything else, regardless of where the join falls. A tie is
+-- only inferred when the join ALSO crosses a beat boundary AND prev's own
+-- length is NOT already clean - i.e. prev is a leftover/irregular
+-- fragment that can't stand as its own symbol, the actual reason a tie
+-- would ever be needed. Two independently-valid-duration notes sharing a
+-- pitch within the same beat essentially never need a tie for that
+-- reason either, so both conditions still have to hold. Trade-off: this
+-- can miss a genuine intentional tie between two notes that both fall
+-- within one beat (uncommon, but it does happen) - accepted since false
+-- positives on repeated notes (fast or, as above, beat-or-longer) are the
+-- more common and more disruptive case.
+local TIE_DURATION_TOLERANCE = 10 -- ticks - forgives minor recording/quantization imprecision
+local function has_clean_duration(duration_ticks)
+  local quarter = M.PPQ_PER_QUARTER
+  for _, base in ipairs({ quarter / 8, quarter / 4, quarter / 2, quarter, quarter * 2, quarter * 4 }) do
+    if math.abs(duration_ticks - base) <= TIE_DURATION_TOLERANCE
+        or math.abs(duration_ticks - base * 1.5) <= TIE_DURATION_TOLERANCE then
+      return true
+    end
+  end
+  return false
+end
+
 -- Returns a render model: list of
 --   { tick, x, duration_ticks, is_grace, notes = {..., tied_from_prev, tied_to_next} }
 -- Only x differs in meaning per staff; y is each drawer's own concern.
@@ -236,7 +265,8 @@ function M.compute(events, opts)
         if prev and prev.pitch == note.pitch and prev.endppq == note.startppq then
           local beat_ticks = beat_ticks_lookup(note.startppq)
           local crosses_beat = math.floor(prev.startppq / beat_ticks) ~= math.floor(note.startppq / beat_ticks)
-          tied = crosses_beat
+          local prev_duration = prev.endppq - prev.startppq
+          tied = crosses_beat and not has_clean_duration(prev_duration)
         end
       end
       copy.tied_from_prev = tied
