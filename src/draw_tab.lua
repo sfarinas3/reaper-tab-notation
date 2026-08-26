@@ -1,15 +1,27 @@
 -- ImGui draw-list rendering for the tab staff: one horizontal line per
 -- string (config.tuning's length, so this scales automatically for
 -- extended-range instruments), fret numbers positioned by
--- layout_engine.lua's x-map, ties drawn as a small arc instead of a
--- repeated number, a stacked "TAB" label at the start of every system
--- (the standard convention, mirroring the clef on the notation staff
--- above it). A note with no valid string/fret (outside the instrument's
--- playable range - usually a mute/scrape) is shown as "x" text at
--- config.layout.x_notehead_string's row, the standard tab convention,
--- rather than a fret number - matching the X notehead the notation staff
--- draws for the same notes. Consumes layout_engine.compute()'s render
--- model - does no layout math of its own.
+-- layout_engine.lua's x-map, a stacked "TAB" label at the start of every
+-- system (the standard convention, mirroring the clef on the notation
+-- staff above it). A note with no valid string/fret (outside the
+-- instrument's playable range - usually a mute/scrape) is shown as "x"
+-- text at config.layout.x_notehead_string's row, the standard tab
+-- convention, rather than a fret number - matching the X notehead the
+-- notation staff draws for the same notes. Consumes layout_engine.
+-- compute()'s render model - does no layout math of its own.
+--
+-- Ties: standard tab convention (unlike the notation staff's curved arc,
+-- which relies on a separate notehead to arc between) is to repeat the
+-- fret number in parentheses - "(5)" - meaning "still sounding, not
+-- re-picked," the same notation published tab (e.g. Hal Leonard editions)
+-- and tab software both use for a held note, a bend's target pitch, etc.
+-- label_for wraps a tied_from_prev note's own label in parens; nothing
+-- else about how a label is measured or drawn needs to know a note is
+-- tied, which is what lets the SAME code path handle a plain, tied, and
+-- X-notehead label uniformly. A tie crossing a system/line break still
+-- gets an additional small stub arc (below) leading into its repeated
+-- number, since two numbers on physically different lines don't read as
+-- connected purely from repetition the way two adjacent ones do.
 --
 -- When config.instrument == "Shamisen", numbers also get bunkafu-style
 -- duration dashes stacked underneath (source: shamisen-zentrale.de's
@@ -162,15 +174,18 @@ local function draw_technique_marker(ctx, draw_list, x, dashes_bottom_y, techniq
 end
 
 -- Label a note would render as - used both for measurement (before layout
--- is computed) and drawing, so the two never disagree about width.
+-- is computed) and drawing, so the two never disagree about width. A tied
+-- note gets its base label wrapped in parentheses - "(5)" - the standard
+-- tab convention for "still sounding, not re-picked" (see this file's
+-- header); everything downstream (measurement, text drawing, let-ring
+-- anchoring) treats it as just another label and needs no separate
+-- tied-note logic of its own.
 local function label_for(note)
+  local base = note.string and tostring(note.fret) or "x"
   if note.tied_from_prev then
-    return nil -- ties draw an arc instead of text; no width to reserve beyond the gap
+    return "(" .. base .. ")"
   end
-  if note.string then
-    return tostring(note.fret)
-  end
-  return "x"
+  return base
 end
 
 -- Returns a function(render_model_event) -> pixels, suitable for
@@ -216,7 +231,6 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
 
   draw_tab_label(ctx, draw_list, origin_x + TAB_LABEL_X_OFFSET, origin_y, staff_height)
 
-  local last_x_by_string = {}
   local is_shamisen = config.instrument == "Shamisen"
 
   for i = 1, #render_model do
@@ -227,58 +241,54 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
       local note = event.notes[j]
       local string_idx = note.string or config.layout.x_notehead_string
       local y = origin_y + (string_idx - 1) * line_height
-      local label_end_x = x -- tied notes draw no label (an arc instead), so dashing can start right at x
 
-      if note.string and note.tied_from_prev and last_x_by_string[note.string] then
-        local x0 = last_x_by_string[note.string]
+      -- label_for wraps a tied note's own label in parentheses - "(5)" -
+      -- so this is the SAME code path for a plain, tied, or X-notehead
+      -- label; a tie needs no branch of its own here (see this file's
+      -- header for why that's the standard tab convention, replacing an
+      -- earlier version that drew an arc with no number at all).
+      local label = label_for(note)
+      local w, h = reaper.ImGui_CalcTextSize(ctx, label)
+      local color = note.string and COLOR_TEXT or COLOR_UNREACHABLE
+      reaper.ImGui_DrawList_AddText(draw_list, x - w / 2, y - h / 2, color, label)
+      local label_end_x = x + w / 2
+
+      -- Incoming half of a tie crossing a system break: M.draw is called
+      -- once per system with fresh local state, so a tie continuing from
+      -- the PREVIOUS system's last note has nothing here to connect back
+      -- to purely from repeating "(5)" on this line - a small stub arc
+      -- leading into the parenthesized number makes the line-break
+      -- continuation explicit, mirroring draw_notation.lua's own
+      -- tied_from_prev/i==1 branch. Only ever true for a system's first
+      -- event, and only when tied_from_prev is set (which the very first
+      -- note of the whole piece can never be) - so this never fires except
+      -- on a genuine cross-system tie. Ends just left of the parenthesized
+      -- number rather than at its own center, so the two don't overlap.
+      if note.string and note.tied_from_prev and i == 1 then
+        local stub_end_x = x - w / 2 - LET_RING_GAP
+        local stub_x = stub_end_x - TIE_STUB_REACH
         local arc_y = y - line_height * 0.4
         reaper.ImGui_DrawList_AddBezierCubic(
-          draw_list, x0, y, x0, arc_y, x, arc_y, x, y, COLOR_TIE, 1.5, 0)
-      else
-        local label = label_for(note)
-        local w, h = reaper.ImGui_CalcTextSize(ctx, label)
-        local color = note.string and COLOR_TEXT or COLOR_UNREACHABLE
-        reaper.ImGui_DrawList_AddText(draw_list, x - w / 2, y - h / 2, color, label)
-        label_end_x = x + w / 2
+          draw_list, stub_x, arc_y, stub_x, arc_y, stub_end_x, arc_y, stub_end_x, y, COLOR_TIE, 1.5, 0)
+      end
 
-        -- Incoming half of a tie crossing a system break (mirrors
-        -- draw_notation.lua's own tied_from_prev/i==1 branch - see its
-        -- comment for the full reasoning: M.draw is called once per
-        -- system with fresh local state, so a tie continuing from the
-        -- PREVIOUS system's last note has no local predecessor here,
-        -- which is exactly why this fell into the label branch instead of
-        -- the tie-arc one above). Ends just left of the repeated number
-        -- rather than at its own center, so the two don't overlap -
-        -- showing both together (number + incoming stub) is itself a
-        -- legitimate, common real tab convention for a line-break
-        -- continuation, clearer here than an arc alone since tab relies
-        -- on explicit numbers rather than notehead position.
-        if note.string and note.tied_from_prev and i == 1 then
-          local stub_end_x = x - w / 2 - LET_RING_GAP
-          local stub_x = stub_end_x - TIE_STUB_REACH
-          local arc_y = y - line_height * 0.4
-          reaper.ImGui_DrawList_AddBezierCubic(
-            draw_list, stub_x, arc_y, stub_x, arc_y, stub_end_x, arc_y, stub_end_x, y, COLOR_TIE, 1.5, 0)
+      if is_shamisen then
+        local number_bottom_y = y + h / 2
+        local dash_count = notation_model.duration_dash_count(event.duration_ticks)
+        local dashes_bottom_y = number_bottom_y
+        if dash_count > 0 then
+          draw_duration_dashes(draw_list, x, number_bottom_y, dash_count)
+          -- draw_duration_dashes' own formula for its LAST dash's y is
+          -- number_bottom_y + DASH_TOP_GAP + (dash_count - 1) * DASH_GAP -
+          -- that's the line's own drawn position (its vertical center,
+          -- give or take its 1px stroke), not a point below it. Half
+          -- DASH_GAP pushes past that into real clearance instead of
+          -- landing right on the last dash itself, which is what let the
+          -- technique glyph below visibly touch it at 2+ dashes.
+          dashes_bottom_y = number_bottom_y + DASH_TOP_GAP + (dash_count - 1) * DASH_GAP + DASH_GAP / 2
         end
-
-        if is_shamisen then
-          local number_bottom_y = y + h / 2
-          local dash_count = notation_model.duration_dash_count(event.duration_ticks)
-          local dashes_bottom_y = number_bottom_y
-          if dash_count > 0 then
-            draw_duration_dashes(draw_list, x, number_bottom_y, dash_count)
-            -- draw_duration_dashes' own formula for its LAST dash's y is
-            -- number_bottom_y + DASH_TOP_GAP + (dash_count - 1) * DASH_GAP -
-            -- that's the line's own drawn position (its vertical center,
-            -- give or take its 1px stroke), not a point below it. Half
-            -- DASH_GAP pushes past that into real clearance instead of
-            -- landing right on the last dash itself, which is what let the
-            -- technique glyph below visibly touch it at 2+ dashes.
-            dashes_bottom_y = number_bottom_y + DASH_TOP_GAP + (dash_count - 1) * DASH_GAP + DASH_GAP / 2
-          end
-          if note.technique then
-            draw_technique_marker(ctx, draw_list, x, dashes_bottom_y, note.technique)
-          end
+        if note.technique then
+          draw_technique_marker(ctx, draw_list, x, dashes_bottom_y, note.technique)
         end
       end
 
@@ -302,9 +312,9 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
       -- system with fresh local state, so a tie continuing into the NEXT
       -- system has no visibility into it here). The INCOMING side at the
       -- start of a system already works for free: a new system's first
-      -- note has no last_x_by_string entry yet, so it falls through to
-      -- the normal label branch above and shows the fret number again -
-      -- a legitimate, common real tab convention for a line-break
+      -- note falls through to the normal label path above regardless of
+      -- any prior state, showing its parenthesized number there - a
+      -- legitimate, common real tab convention for a line-break
       -- continuation, arguably clearer here than on the notation staff
       -- since tab relies on explicit numbers rather than notehead
       -- position. Only the OUTGOING side, at the end of a system, needs
@@ -313,10 +323,6 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks)
         local edge_x = origin_x + content_width
         local arc_y = y - line_height * 0.4
         reaper.ImGui_DrawList_AddBezierCubic(draw_list, x, y, x, arc_y, edge_x, arc_y, edge_x, arc_y, COLOR_TIE, 1.5, 0)
-      end
-
-      if note.string then
-        last_x_by_string[note.string] = x
       end
     end
   end
