@@ -223,7 +223,7 @@ end
 -- Panel
 -- ---------------------------------------------------------------------
 
--- Draws the "Measure Correction" section - call once per frame, e.g.
+-- Draws the "Measure Correction Tool" section - call once per frame, e.g.
 -- alongside ui_chrome.draw, AFTER main.lua's own recompute block so
 -- assigned_events/measure_ticks/measure_info reflect this frame's take.
 -- Self-contained: does its own MIDI_SetNote writes (via apply_corrections)
@@ -236,12 +236,13 @@ function M.draw_panel(ctx, take, assigned_events, measure_ticks, measure_info)
     return
   end
 
-  if not reaper.ImGui_CollapsingHeader(ctx, "Measure Correction", nil) then
+  if not reaper.ImGui_CollapsingHeader(ctx, "Measure Correction Tool", nil) then
     return
   end
 
   if not selected_measure_idx then
-    reaper.ImGui_TextWrapped(ctx, "Click a measure on the tab staff (below) to select it.")
+    reaper.ImGui_TextWrapped(
+      ctx, "After manually correcting a measure, you can apply those changes to similar measures automatically.")
     return
   end
 
