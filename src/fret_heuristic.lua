@@ -112,18 +112,34 @@ end
 -- ---------------------------------------------------------------------
 
 -- Approximate fretting-hand position: average fret among non-open notes in
--- the state. nil if every note is open or unreachable (no position anchor).
+-- the state (an open string doesn't constrain hand position, so it's
+-- excluded the same way a chord mixing open and fretted notes always has
+-- been - the fretted notes alone anchor the hand). The one case that
+-- changes: if EVERY reachable note in the state is open (an all-open-
+-- string palm-muted chug, the djent-chugging-into-a-lead-leap case this
+-- was added for), there are no fretted notes to average - rather than
+-- returning nil (which used to make transition_cost skip the position
+-- term entirely, leaving the DP with no memory of where the hand was
+-- right when a wide leap out of a chug is most likely), treat that as
+-- position 0: hand resting near the nut, which is where it actually is
+-- during open-string chugging. nil is reserved for "nothing in this
+-- state is reachable at all" (no position exists to anchor anything).
 local function hand_position(state)
   local sum, n = 0, 0
+  local any_reachable = false
   for i = 1, #state do
     local assign = state[i]
-    if assign and assign.fret > 0 then
-      sum = sum + assign.fret
-      n = n + 1
+    if assign then
+      any_reachable = true
+      if assign.fret > 0 then
+        sum = sum + assign.fret
+        n = n + 1
+      end
     end
   end
-  if n == 0 then return nil end
-  return sum / n
+  if n > 0 then return sum / n end
+  if any_reachable then return 0 end
+  return nil
 end
 
 local function avg_string(state)
