@@ -105,6 +105,19 @@ M.weights = {
   stretch_penalty = 2.0,          -- cost per fret beyond max_comfortable_stretch, within a chord
   position_change_weight = 1.0,   -- cost per fret of hand-position movement between events
   string_change_weight = 0.3,     -- cost per string of average string-index movement between events
+
+  -- Wide-leap same-string preference (fret_heuristic.lua's wide_leap_cost):
+  -- a big, sudden pitch jump (e.g. a djent-style chug-to-lead leap, often
+  -- played as a slide/tap continuing up the SAME string) should stay on
+  -- the previous note's string even at a much higher fret, rather than
+  -- hop to a different string purely to reach a lower fret number the
+  -- way position_change_weight/fret_height_penalty alone would prefer.
+  -- Scoped narrowly (single notes only, only when the interval clears
+  -- this threshold, only when a same-string option is actually reachable)
+  -- so it doesn't touch ordinary passages where cross-string economy is
+  -- still the right call - see fret_heuristic.lua for exactly how.
+  wide_leap_semitones = 7,            -- interval (in semitones) that counts as a "wide leap"
+  wide_leap_string_change_penalty = 10, -- flat extra cost for changing strings across a wide leap
 }
 
 -- Shared layout constants (layout_engine.lua, draw_tab.lua, draw_notation.lua).
