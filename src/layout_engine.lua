@@ -397,7 +397,40 @@ end
 -- - tick_lo/tick_hi: this system's tick range, so a caller (e.g. the
 --   playhead) can tell which system a given tick falls into.
 function M.wrap_into_systems(render_model, measure_ticks, max_width)
-  if #render_model == 0 then return {} end
+  if #render_model == 0 then
+    -- A genuinely empty take (no notes at all) still has real measure_ticks
+    -- - notation_model.measure_boundaries walks REAPER's own project
+    -- measure grid regardless of whether there are any notes, so an empty
+    -- take still gets at least one real measure's worth of boundaries.
+    -- Returning nothing here used to mean an empty take had no system at
+    -- all to render - blocking tab_editor.lua's Edit Mode from having
+    -- anywhere to click to create the very FIRST note. Space each measure
+    -- at a fixed default width (the widest duration-class entry - a whole
+    -- note's width) since there's no real note content here to size
+    -- against, same shape contract as every other system (draw_tab.lua/
+    -- draw_notation.lua/tab_editor.lua already have to tolerate a
+    -- zero-event system for an ordinary silent passage mid-piece, via
+    -- M.x_for_tick_from_boundaries above - this is that same case, just
+    -- spanning the whole take instead of one stretch of it).
+    if measure_ticks and #measure_ticks >= 2 then
+      local default_measure_width = config.layout.duration_classes[#config.layout.duration_classes].width
+      local x = config.layout.left_margin
+      local ticks, barline_x = {}, {}
+      for i = 1, #measure_ticks do
+        table.insert(ticks, measure_ticks[i])
+        table.insert(barline_x, x)
+        if i < #measure_ticks then x = x + default_measure_width end
+      end
+      return {
+        {
+          events = {}, ticks = ticks, barline_x = barline_x,
+          item_measure_start = 1,
+          tick_lo = measure_ticks[1], tick_hi = measure_ticks[#measure_ticks],
+        },
+      }
+    end
+    return {}
+  end
 
   if not measure_ticks or #measure_ticks < 2 then
     return {

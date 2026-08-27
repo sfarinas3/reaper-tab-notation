@@ -58,6 +58,16 @@
 -- REAPER's own piano roll has no way to set one. Duration changes,
 -- insert/delete, and dragging remain REAPER-piano-roll-only.
 --
+-- Edit Mode (ui_chrome.lua's toggle at the top of the panel; tab_editor.
+-- lua): a second, mutually-exclusive click surface alongside note_editor.
+-- lua's View Mode above - clicking an empty tab-staff grid position opens
+-- a popup to type a fret number, creating a real MIDI note (chan pinned to
+-- the clicked string) at a fixed grid duration; clicking an existing note
+-- opens a popup to delete it. Real note creation/deletion, unlike Phase
+-- 6's reassignment-only scope - see tab_editor.lua's header for the click-
+-- locating/collision-handling design. Duration is fixed for now;
+-- drag-to-resize is a later, separate phase.
+--
 -- Score header (title/composer/arranger, ui_chrome.lua's "Score Info"
 -- section): drawn once above the very first system, like a real printed
 -- score's title page - title centered and enlarged, composer/arranger
@@ -97,6 +107,7 @@ local draw_notation = require('draw_notation')
 local score_render = require('score_render')
 local ui_chrome = require('ui_chrome')
 local note_editor = require('note_editor')
+local tab_editor = require('tab_editor')
 local measure_correction = require('measure_correction')
 local color_util = require('color_util')
 local pdf_export = require('pdf_export')
@@ -222,7 +233,10 @@ local function main()
   -- ui_chrome.draw's return is a second, explicit cache-invalidation
   -- signal alongside the note-hash check below - tuning/capo edits never
   -- touch the MIDI take, so the hash alone would never notice them.
-  local settings_changed = ui_chrome.draw(ctx, config, take, do_export, on_revert_all)
+  -- edit_mode (second return) picks which module's check_system runs on a
+  -- staff click below - View Mode's note_editor (unchanged) or Edit
+  -- Mode's tab_editor (create/delete notes) - see tab_editor.lua's header.
+  local settings_changed, edit_mode = ui_chrome.draw(ctx, config, take, do_export, on_revert_all)
 
   if hash ~= last_hash or settings_changed or take_settings_changed or pending_recompute then
     last_hash = hash
@@ -257,19 +271,36 @@ local function main()
 
   if not take then
     reaper.ImGui_TextWrapped(ctx, "Select a MIDI item on a track in REAPER to see its notes here.")
-    -- Still gives the popup its BeginPopup/EndPopup pair even on this
-    -- early return - if a popup was left open when the take disappeared
-    -- (e.g. the user deselected the item mid-edit), skipping this call
-    -- would leave ReaImGui's popup stack out of sync for a frame.
+    -- Still gives both modules' popups their BeginPopup/EndPopup pair even
+    -- on this early return - if a popup was left open when the take
+    -- disappeared (e.g. the user deselected the item mid-edit, or
+    -- switched Edit Mode off/on mid-interaction), skipping this call
+    -- would leave ReaImGui's popup stack out of sync for a frame. Both
+    -- run unconditionally regardless of edit_mode - only the systems
+    -- loop's per-click hit-test (below) actually branches on it.
     note_editor.begin_frame(ctx)
+    tab_editor.begin_frame(ctx, take, cached_assigned_events)
     pending_recompute = note_editor.end_frame(ctx, take)
+    tab_editor.end_frame(ctx)
     return
   end
 
-  if not cached_render_model or #cached_render_model == 0 then
-    reaper.ImGui_TextWrapped(ctx, "Selected item has no notes.")
+  -- Deliberately NOT gated on #cached_render_model == 0 - a take with zero
+  -- notes still has real cached_measure_ticks (notation_model.
+  -- measure_boundaries walks REAPER's own project measure grid regardless
+  -- of note content), and layout_engine.wrap_into_systems now turns that
+  -- into one real, empty, clickable system rather than nothing - the fix
+  -- for Edit Mode (tab_editor.lua) having nowhere to click to create the
+  -- very FIRST note on an empty take. Only bail out here if there's
+  -- nothing renderable at all (no take-level measure info to anchor a
+  -- staff to), which in practice means something is actually wrong with
+  -- the item rather than "it just has no notes yet."
+  if not cached_measure_ticks or #cached_measure_ticks < 2 then
+    reaper.ImGui_TextWrapped(ctx, "Unable to read this item's measures.")
     note_editor.begin_frame(ctx)
+    tab_editor.begin_frame(ctx, take, cached_assigned_events)
     pending_recompute = note_editor.end_frame(ctx, take)
+    tab_editor.end_frame(ctx)
     return
   end
 
@@ -346,6 +377,7 @@ local function main()
   local beat_ticks_lookup = notation_model.beat_ticks_lookup(cached_measure_ticks, cached_measure_info)
 
   note_editor.begin_frame(ctx)
+  tab_editor.begin_frame(ctx, take, cached_assigned_events)
   measure_correction.begin_frame(ctx)
 
   for s = 1, #systems do
@@ -361,7 +393,16 @@ local function main()
     -- formula draw_system uses internally.
     local middle_c_y = origin_y + sys_top_local_y + geo.notation_above
     local tab_origin_y = middle_c_y + geo.notation_below + config.layout.staff_gap
-    note_editor.check_system(origin_x, tab_origin_y, system.events)
+    -- Mutually exclusive per click, not both running at once - View
+    -- Mode's click-to-correct popup (existing notes only) vs Edit Mode's
+    -- click-to-create/delete (see tab_editor.lua's header). Both
+    -- modules' begin_frame/end_frame still run unconditionally around
+    -- this loop either way, only this per-system hit-test call branches.
+    if edit_mode then
+      tab_editor.check_system(origin_x, tab_origin_y, system)
+    else
+      note_editor.check_system(origin_x, tab_origin_y, system.events)
+    end
     measure_correction.check_system(origin_x, bar_top, bar_bottom, system)
 
     total_width = math.max(total_width, notation_width, tab_width)
@@ -374,6 +415,7 @@ local function main()
   end
 
   pending_recompute = note_editor.end_frame(ctx, take)
+  tab_editor.end_frame(ctx)
 
   local total_height = geo.top_reserve + (#systems * geo.system_pitch - config.layout.system_gap) + BOTTOM_MARGIN
 

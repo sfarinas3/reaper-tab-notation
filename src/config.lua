@@ -81,6 +81,10 @@ M.show_note_names = false
 -- fallback, no per-take save.
 M.print_scale = 0.4
 
+-- Default MIDI velocity for a note created via Edit Mode (tab_editor.lua) -
+-- REAPER's own piano-roll default. No UI to change this in Phase 1.
+M.edit_default_velocity = 100
+
 -- Japanese-capable font draw_tab.lua's shamisen technique markers (real
 -- katakana, e.g. ハ for hajiki) are drawn with - see main.lua, which loads
 -- and attaches it once at startup. jp_font_file is tried first, as an
@@ -151,6 +155,16 @@ M.weights = {
 -- Shared layout constants (layout_engine.lua, draw_tab.lua, draw_notation.lua).
 M.layout = {
   ppq_per_quarter = 960,  -- REAPER's MIDI API tick resolution (MIDI_GetNote positions)
+
+  -- Edit Mode (tab_editor.lua): fixed grid subdivision new notes snap to
+  -- when clicking an empty tab-staff position, in ticks - a 16th note at
+  -- this file's ppq_per_quarter (matches duration_classes' own "16th"
+  -- entry below). Also doubles as a newly-inserted note's default
+  -- duration, so consecutively-typed notes chain back-to-back with no
+  -- gap. Phase 2's drag-resize is the natural place a note's own length
+  -- and the click grid's snap granularity would need to become separate
+  -- knobs - Phase 1 doesn't need that distinction.
+  edit_grid_ticks = 240,
   min_gap = 6,            -- minimum pixels between adjacent events' rendered content
   left_margin = 90,       -- room for the clef (every system) + time signature (first system, and wherever it changes) + a clear gap before the first note
   right_margin = 24,

@@ -483,6 +483,14 @@ local export_status = nil -- { ok = bool, message = string } from the last expor
 -- above (a one-shot message from the last click, not a persisted field).
 local revert_status = nil
 
+-- Edit Mode (tab_editor.lua): toggles the tab staff between today's View
+-- Mode (note_editor.lua's click-to-correct popup, unchanged) and a new
+-- surface for creating/deleting notes directly. Module-local, not
+-- persisted to ExtState/take like the settings above - every fresh
+-- script start opens in View Mode (false) so a session never opens
+-- silently armed to write MIDI on a stray staff click.
+local edit_mode = false
+
 -- A best-effort starting point for the path field: the current project's
 -- own folder (reaper.GetProjectPath, pcall-guarded since this isn't a
 -- function this codebase has called before and it's not worth a hard
@@ -515,6 +523,10 @@ end
 -- as "please recompute,"
 -- alongside their own note-hash check (see header comment: none of these
 -- settings touch the MIDI take, so a hash check alone never notices them).
+-- Second return value: edit_mode (boolean) - whether the tab staff is
+-- currently in Edit Mode (tab_editor.lua) rather than View Mode
+-- (note_editor.lua) - the caller uses this to pick which module's
+-- check_system runs on a staff click each frame (see main.lua).
 -- take: the currently active take (may be nil, e.g. nothing selected) -
 -- used only to also save_for_take on a change, so this specific item
 -- remembers it; safe to pass nil, that save just no-ops.
@@ -537,6 +549,17 @@ function M.draw(ctx, cfg, take, on_export, on_revert_all)
   end
 
   local changed = false
+
+  -- Always visible, at the very top - this changes what every click on
+  -- the staff does, so it needs to be seen before scrolling past any
+  -- other section, unlike the passive display toggles ("Show Note
+  -- Names") tucked at the bottom. See edit_mode's own comment above for
+  -- why this isn't persisted across sessions.
+  local edit_mode_changed, new_edit_mode = reaper.ImGui_Checkbox(ctx, "Edit Mode (create/delete notes)", edit_mode)
+  if edit_mode_changed then
+    edit_mode = new_edit_mode
+  end
+  reaper.ImGui_Separator(ctx)
 
   if reaper.ImGui_CollapsingHeader(ctx, "Score Info", nil) then
     local rv_title, new_title = reaper.ImGui_InputText(ctx, "Title", cfg.title or "")
@@ -748,7 +771,7 @@ function M.draw(ctx, cfg, take, on_export, on_revert_all)
     M.save_for_take(take, cfg)
   end
 
-  return changed
+  return changed, edit_mode
 end
 
 return M
