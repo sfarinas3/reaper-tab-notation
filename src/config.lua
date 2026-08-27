@@ -132,6 +132,20 @@ M.weights = {
   wide_leap_string_change_penalty = 20,    -- cost for landing a leap on a different, non-open string
   wide_leap_tap_fret_threshold = 12,       -- previous note's fret, above which a run counts as "already tapping"
   wide_leap_tap_continuation_penalty = 20, -- extra cost on top, for abandoning an already-tapping string
+
+  -- position_change_weight (above) assumes every fret of movement costs
+  -- the fretting hand roughly the same effort - true for an ordinary
+  -- shift, not for tapping. Traced by hand against a real riff: without
+  -- this, rule 2's same-string preference above would correctly keep a
+  -- tap run together going UP, then get outbid on the way back DOWN by a
+  -- route through a totally different (but already-open) string, since
+  -- "climb to fret 24 then back to fret 0 on one string" reads as double
+  -- the raw fret-distance of "stay near fret 0 the whole time on a
+  -- different string" under position_change_weight alone - even though
+  -- the tapping hand didn't actually travel that distance. Used instead
+  -- of position_change_weight for a same-string transition where either
+  -- endpoint is already above wide_leap_tap_fret_threshold.
+  tap_position_change_weight = 0.05,
 }
 
 -- Shared layout constants (layout_engine.lua, draw_tab.lua, draw_notation.lua).

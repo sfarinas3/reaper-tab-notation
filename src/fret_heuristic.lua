@@ -207,6 +207,31 @@ local function wide_leap_cost(prev_state, state)
   local interval = math.abs(assignment_pitch(cur) - assignment_pitch(prev))
   if interval < w.wide_leap_semitones then return 0 end
 
+  -- Forced abandonment: cur's pitch is below prev's string's OPEN pitch,
+  -- so no fret could ever reach it there - staying was never an option.
+  -- The whole point of this penalty is to discourage a WASTEFUL early
+  -- bail-out when the run could have continued - it shouldn't also tax a
+  -- change that was mandatory. Traced against a real riff: without this,
+  -- a note with no reachable string in common with its neighbors (e.g.
+  -- landing well outside every other candidate's range) pays the same
+  -- string-change cost as a lazy one, which is steep enough to
+  -- retroactively distort the PREVIOUS note's own choice.
+  --
+  -- Deliberately checks only the LOW side (target_fret < 0), not the
+  -- high side (target_fret > max_fret): also waiving it there was tried
+  -- and reverted - it let a run that had climbed to max_fret get a free
+  -- pass to ANY subsequent pitch (since almost nothing is reachable from
+  -- the ceiling), which made parking at the ceiling systematically
+  -- cheaper than a sensible low-fret alternative for the exact same note
+  -- reachable both ways. A string's open pitch is a fixed floor no
+  -- matter what fret came before, which is what makes the low side safe
+  -- to forgive; max_fret is just wherever the run happens to have
+  -- climbed to, which isn't.
+  local target_fret = assignment_pitch(cur) - (config.tuning[prev.string] + config.capo)
+  if target_fret < 0 then
+    return 0
+  end
+
   -- rule 2 takes priority over rule 1/3 once already up in tapping
   -- territory: the DP optimizes the WHOLE remaining path, not just this
   -- one step, so an unconditional "open is always free" pass lets it
@@ -227,14 +252,46 @@ local function wide_leap_cost(prev_state, state)
   return penalty
 end
 
+-- position_change_weight assumes every fret of movement costs the
+-- fretting hand roughly the same effort, which holds for an ordinary
+-- shift/slide but not for tapping: staying on the SAME string while
+-- either endpoint is already above wide_leap_tap_fret_threshold doesn't
+-- cost the fretting hand a normal fret-by-fret repositioning (that's
+-- what makes rule 2's same-string preference actually pay off instead
+-- of fighting the position cost that motivated switching away from the
+-- string in the first place) - use tap_position_change_weight instead
+-- for that one transition. Gated on `established_run` (see
+-- M.assign_events' run_len tracking): the discount is only earned by a
+-- candidate that's ALREADY at least two notes deep into holding this
+-- string, not a one-off arrival that happens to land on it via a big
+-- cross-string leap of its own. Without this gate, a fresh arrival's
+-- cheap-looking same-string exit can retroactively make the DP prefer
+-- that wrong arrival over the previous note's own genuinely better
+-- choice, purely to set up the discount for whatever comes after -
+-- traced against a real riff where this exact thing was pulling an
+-- otherwise-correct note onto the wrong string. Single-note states
+-- only, matching wide_leap_cost's own scope.
+local function position_weight_for(prev_state, state, established_run)
+  local w = config.weights
+  if established_run and #prev_state == 1 and #state == 1 and prev_state[1] and state[1]
+      and prev_state[1].string == state[1].string
+      and (prev_state[1].fret > w.wide_leap_tap_fret_threshold or state[1].fret > w.wide_leap_tap_fret_threshold) then
+    return w.tap_position_change_weight
+  end
+  return w.position_change_weight
+end
+
 -- Cost of moving from prev_state's hand position/strings to state's.
-local function transition_cost(prev_state, state)
+-- established_run: true when prev_state is itself already 2+ consecutive
+-- same-string notes deep (see M.assign_events) - passed through to
+-- position_weight_for, see its comment for why this gate exists.
+local function transition_cost(prev_state, state, established_run)
   local w = config.weights
   local cost = 0
 
   local prev_pos, pos = hand_position(prev_state), hand_position(state)
   if prev_pos and pos then
-    cost = cost + math.abs(pos - prev_pos) * w.position_change_weight
+    cost = cost + math.abs(pos - prev_pos) * position_weight_for(prev_state, state, established_run)
   end
 
   local prev_str, str = avg_string(prev_state), avg_string(state)
@@ -265,10 +322,19 @@ function M.assign_events(events)
 
   local costs = {}
   local backptr = {}
+  -- run_len[e][si]: how many consecutive events, ending at e, candidate
+  -- si has stayed on the same single string (>=1 always; >=2 means its
+  -- OWN predecessor was already on this string too, i.e. a real run, not
+  -- a fresh arrival). See position_weight_for's comment for why this
+  -- matters - it's what lets that discount tell a genuine in-progress
+  -- tap run apart from a one-off landing that only coincidentally shares
+  -- a string with whatever comes next.
+  local run_len = {}
 
   for e = 1, n_events do
     costs[e] = {}
     backptr[e] = {}
+    run_len[e] = {}
     local states = states_per_event[e]
 
     for si = 1, #states do
@@ -276,11 +342,13 @@ function M.assign_events(events)
 
       if e == 1 then
         costs[e][si] = ic
+        run_len[e][si] = 1
       else
         local prev_states = states_per_event[e - 1]
         local best_cost, best_prev = nil, nil
         for pi = 1, #prev_states do
-          local c = costs[e - 1][pi] + transition_cost(prev_states[pi], states[si])
+          local established = (run_len[e - 1][pi] or 1) >= 2
+          local c = costs[e - 1][pi] + transition_cost(prev_states[pi], states[si], established)
           if not best_cost or c < best_cost then
             best_cost = c
             best_prev = pi
@@ -288,6 +356,14 @@ function M.assign_events(events)
         end
         costs[e][si] = best_cost + ic
         backptr[e][si] = best_prev
+
+        local state, prev_state = states[si], prev_states[best_prev]
+        if #state == 1 and #prev_state == 1 and state[1] and prev_state[1]
+            and state[1].string == prev_state[1].string then
+          run_len[e][si] = (run_len[e - 1][best_prev] or 1) + 1
+        else
+          run_len[e][si] = 1
+        end
       end
     end
   end
