@@ -207,13 +207,21 @@ local function wide_leap_cost(prev_state, state)
   local interval = math.abs(assignment_pitch(cur) - assignment_pitch(prev))
   if interval < w.wide_leap_semitones then return 0 end
 
-  if cur.fret == 0 then return 0 end -- rule 1/3: landing a leap on an open string is always free
+  -- rule 2 takes priority over rule 1/3 once already up in tapping
+  -- territory: the DP optimizes the WHOLE remaining path, not just this
+  -- one step, so an unconditional "open is always free" pass lets it
+  -- abandon a run early to take a cheaper detour through low frets
+  -- overall - even though locally continuing the run looked fine. Only
+  -- waive the string-change penalty for an open landing when the
+  -- previous note DIDN'T already commit to a high position.
+  local already_tapping = prev.fret > w.wide_leap_tap_fret_threshold
 
-  -- rule 2: switching strings costs a penalty, boosted if the previous
-  -- note was already up in tapping territory (a run shouldn't abandon
-  -- its string just because a different one reaches the next note too).
+  if cur.fret == 0 and not already_tapping then
+    return 0 -- rule 1/3: landing a leap on an open string is free
+  end
+
   local penalty = w.wide_leap_string_change_penalty
-  if prev.fret > w.wide_leap_tap_fret_threshold then
+  if already_tapping then
     penalty = penalty + w.wide_leap_tap_continuation_penalty
   end
   return penalty
