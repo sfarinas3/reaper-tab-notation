@@ -64,6 +64,29 @@ local function round(v)
   return math.floor(v + 0.5)
 end
 
+-- MIDI_InsertNote/MIDI_DeleteNote have a known REAPER API gap: unlike
+-- MIDI_SetNote (which note_editor.lua's edits rely on and have undone
+-- reliably all along), an insert/delete doesn't reliably register its own
+-- undo state just from being wrapped in Undo_BeginBlock/EndBlock -
+-- Ctrl+Z can silently no-op. This is the documented workaround other
+-- REAPER scripters have published for the same problem (MIDI_Sort to
+-- finalize the take's internal state, then UpdateItemInProject +
+-- MarkTrackItemsDirty to nudge REAPER's undo system) - applied here since
+-- it's a real, harmless mitigation, but tested against this app's actual
+-- Edit Mode create/delete flow and CONFIRMED NOT SUFFICIENT ON ITS OWN -
+-- Ctrl+Z still doesn't reliably undo an insert/delete even with this in
+-- place. Left in rather than reverted since it's still correct per
+-- REAPER's own guidance and may be doing some of the work, but this is a
+-- known, unresolved limitation of Edit Mode's create/delete - not
+-- something to trust as fixed. Root cause not yet identified; see the
+-- project's own memory notes for what's been ruled out so far.
+local function finalize_midi_write(take)
+  reaper.MIDI_Sort(take)
+  local item = reaper.GetMediaItemTake_Item(take)
+  reaper.UpdateItemInProject(item)
+  reaper.MarkTrackItemsDirty(reaper.GetMediaItemTake_Track(take), item)
+end
+
 -- Per-frame click state (begin_frame..end_frame), mirroring note_editor.
 -- lua's own triplet convention - mouse polling is not centralized in this
 -- app, each module polls independently.
@@ -231,6 +254,7 @@ local function commit_create(ctx, fret_str)
   reaper.Undo_BeginBlock()
   reaper.MIDI_InsertNote(
     target_take, false, false, start_tick, end_tick, string_idx, pitch, config.edit_default_velocity, false)
+  finalize_midi_write(target_take)
   reaper.Undo_EndBlock("Insert note (tab/notation viewer)", UNDO_ALL)
 
   pending_create = nil
@@ -240,6 +264,7 @@ end
 local function commit_delete(ctx)
   reaper.Undo_BeginBlock()
   reaper.MIDI_DeleteNote(target_take, pending_delete.note.idx)
+  finalize_midi_write(target_take)
   reaper.Undo_EndBlock("Delete note (tab/notation viewer)", UNDO_ALL)
 
   pending_delete = nil
