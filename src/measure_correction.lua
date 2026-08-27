@@ -242,7 +242,8 @@ function M.draw_panel(ctx, take, assigned_events, measure_ticks, measure_info)
 
   if not selected_measure_idx then
     reaper.ImGui_TextWrapped(
-      ctx, "After manually correcting a measure, you can apply those changes to similar measures automatically.")
+      ctx, "After manually correcting a measure, you can apply those changes to similar measures. " ..
+      "Click a measure on the staff you want to use as a template to correct other similar measures.")
     return
   end
 
