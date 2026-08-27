@@ -186,6 +186,39 @@ local function intrinsic_cost(state)
   return cost
 end
 
+-- The pitch a candidate assignment actually produces - reconstructed from
+-- string/fret rather than carried on the state itself (states only ever
+-- store {string, fret}, never pitch - see generate_event_states).
+local function assignment_pitch(assign)
+  return config.tuning[assign.string] + config.capo + assign.fret
+end
+
+-- Wide-pitch-leap handling - see config.lua's own comment on the
+-- wide_leap_* weights for the three rules this implements and why.
+-- Scoped to single-note states only (a chord isn't a "leap" in this
+-- sense) - a chord transition falls through to 0 (unaffected).
+local function wide_leap_cost(prev_state, state)
+  if #prev_state ~= 1 or #state ~= 1 then return 0 end
+  local prev, cur = prev_state[1], state[1]
+  if not prev or not cur then return 0 end
+  if prev.string == cur.string then return 0 end -- staying put is always free
+
+  local w = config.weights
+  local interval = math.abs(assignment_pitch(cur) - assignment_pitch(prev))
+  if interval < w.wide_leap_semitones then return 0 end
+
+  if cur.fret == 0 then return 0 end -- rule 1/3: landing a leap on an open string is always free
+
+  -- rule 2: switching strings costs a penalty, boosted if the previous
+  -- note was already up in tapping territory (a run shouldn't abandon
+  -- its string just because a different one reaches the next note too).
+  local penalty = w.wide_leap_string_change_penalty
+  if prev.fret > w.wide_leap_tap_fret_threshold then
+    penalty = penalty + w.wide_leap_tap_continuation_penalty
+  end
+  return penalty
+end
+
 -- Cost of moving from prev_state's hand position/strings to state's.
 local function transition_cost(prev_state, state)
   local w = config.weights
@@ -200,6 +233,8 @@ local function transition_cost(prev_state, state)
   if prev_str and str then
     cost = cost + math.abs(str - prev_str) * w.string_change_weight
   end
+
+  cost = cost + wide_leap_cost(prev_state, state)
 
   return cost
 end

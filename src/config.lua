@@ -105,6 +105,28 @@ M.weights = {
   stretch_penalty = 2.0,          -- cost per fret beyond max_comfortable_stretch, within a chord
   position_change_weight = 1.0,   -- cost per fret of hand-position movement between events
   string_change_weight = 0.3,     -- cost per string of average string-index movement between events
+
+  -- Wide pitch leap handling (fret_heuristic.lua's wide_leap_cost) - three
+  -- rules for a big, sudden interval jump (e.g. a djent-style chug-to-
+  -- lead run), worked out against a real riff:
+  --   1. The leap's landing note prefers an open string if one reaches
+  --      it, whichever direction the leap went (up into a lead line, or
+  --      back down out of one) - always free, no extra weight needed
+  --      beyond open_string_bonus above already doing its job once this
+  --      makes the open candidate actually competitive against a wide
+  --      leap's other costs.
+  --   2. Otherwise, staying on the SAME string as the previous note is
+  --      free; switching to a different string costs
+  --      wide_leap_string_change_penalty.
+  --   3. That penalty gets an extra wide_leap_tap_continuation_penalty on
+  --      top once the previous note was already above
+  --      wide_leap_tap_fret_threshold - once a run is already up in
+  --      tapping territory, it should take a lot more to abandon that
+  --      string than it would starting from a low position.
+  wide_leap_semitones = 7,                 -- interval (in semitones) that counts as a "wide leap"
+  wide_leap_string_change_penalty = 15,    -- cost for landing a leap on a different, non-open string
+  wide_leap_tap_fret_threshold = 12,       -- previous note's fret, above which a run counts as "already tapping"
+  wide_leap_tap_continuation_penalty = 15, -- extra cost on top, for abandoning an already-tapping string
 }
 
 -- Shared layout constants (layout_engine.lua, draw_tab.lua, draw_notation.lua).
