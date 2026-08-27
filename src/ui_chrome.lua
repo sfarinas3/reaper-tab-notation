@@ -479,6 +479,10 @@ end
 local export_path_buf = nil
 local export_status = nil -- { ok = bool, message = string } from the last export attempt, or nil before any attempt this session
 
+-- "Revert All Manual Changes" status - same pattern as export_status
+-- above (a one-shot message from the last click, not a persisted field).
+local revert_status = nil
+
 -- A best-effort starting point for the path field: the current project's
 -- own folder (reaper.GetProjectPath, pcall-guarded since this isn't a
 -- function this codebase has called before and it's not worth a hard
@@ -521,7 +525,12 @@ end
 -- this UI-only module has any business knowing about). Omit it (or pass
 -- nil) and the section still draws but the button just does nothing -
 -- safe for any future caller that doesn't wire printing up yet.
-function M.draw(ctx, cfg, take, on_export)
+-- on_revert_all: optional function(), called when "Revert All Manual
+-- Changes" (below) is clicked - main.lua supplies note_editor.revert_all
+-- closed over the current take, the same indirection on_export uses,
+-- since this UI-only module has no business touching the MIDI take
+-- directly. Omit it and the button still draws but does nothing.
+function M.draw(ctx, cfg, take, on_export, on_revert_all)
   if not buffers_initialized then
     sync_buffers(cfg.tuning)
     buffers_initialized = true
@@ -704,6 +713,23 @@ function M.draw(ctx, cfg, take, on_export)
       reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), status_color)
       reaper.ImGui_TextWrapped(ctx, export_status.message)
       reaper.ImGui_PopStyleColor(ctx)
+    end
+  end
+
+  if reaper.ImGui_CollapsingHeader(ctx, "Manual Overrides", nil) then
+    reaper.ImGui_TextWrapped(ctx,
+      "Clears every manual string/fret pin and shamisen technique tag on this take, letting the heuristic " ..
+      "re-decide everything. One REAPER undo step - Ctrl+Z brings it all back.")
+    if reaper.ImGui_Button(ctx, "Revert All Manual Changes") then
+      if on_revert_all then
+        local did_something = on_revert_all()
+        revert_status = did_something and "Reverted." or "Nothing to revert - no manual pins or technique tags on this take."
+      else
+        revert_status = "Reverting isn't wired up."
+      end
+    end
+    if revert_status then
+      reaper.ImGui_TextWrapped(ctx, revert_status)
     end
   end
 

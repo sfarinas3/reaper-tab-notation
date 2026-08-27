@@ -195,6 +195,59 @@ local function draw_popup(ctx)
   end
 end
 
+-- Reverts every manual override on this take back to the heuristic's own
+-- judgment: every note's channel (the string pin - see header) resets to
+-- 0/auto, and the take's entire shamisen technique-tag map (P_EXT) is
+-- cleared. One atomic REAPER undo step - Ctrl+Z restores every pin/
+-- technique tag exactly as it was in a single press, same one-block-per-
+-- action convention as commit_edit/commit_technique above. No-ops (no
+-- undo entry at all) if there's nothing to revert - returns false in
+-- that case (true otherwise) so a caller can show an accurate status
+-- message instead of always claiming success.
+--
+-- Bulk MIDI_SetNote calls use noSort=true plus one MIDI_Sort at the end,
+-- NOT the per-call auto-sort commit_edit relies on for a single edit -
+-- sorting between calls would renumber every remaining note.idx from
+-- this same midi_read.read_notes pass (see this file's header on why one
+-- edit per click exists at all), silently misdirecting later writes in
+-- this same loop at whatever note ends up at that index next.
+function M.revert_all(take)
+  local notes = midi_read.read_notes(take)
+  local existing_techniques = midi_read.read_technique_map(take)
+
+  local any_pinned = false
+  for i = 1, #notes do
+    if (notes[i].chan or 0) ~= 0 then
+      any_pinned = true
+      break
+    end
+  end
+  local any_techniques = next(existing_techniques) ~= nil
+
+  if not any_pinned and not any_techniques then return false end
+
+  reaper.Undo_BeginBlock()
+
+  if any_pinned then
+    for i = 1, #notes do
+      local note = notes[i]
+      if (note.chan or 0) ~= 0 then
+        reaper.MIDI_SetNote(take, note.idx, nil, nil, nil, nil, 0, note.pitch, nil, true)
+      end
+    end
+    reaper.MIDI_Sort(take)
+  end
+
+  if any_techniques then
+    reaper.GetSetMediaItemTakeInfo_String(take, midi_read.TECH_EXT_KEY, midi_read.serialize_technique_map({}), true)
+  end
+
+  reaper.Undo_EndBlock("Revert all manual changes (tab/notation viewer)", UNDO_ALL)
+
+  technique_changed = true
+  return true
+end
+
 -- Call once per frame after every system has been checked. Opens the
 -- popup for this frame's closest hit (if any), then draws it if it's
 -- currently open - the standard ImGui "OpenPopup this frame, BeginPopup

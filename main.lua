@@ -209,10 +209,20 @@ local function main()
     take_settings_changed = ui_chrome.load_for_take(take, config)
   end
 
+  -- Defined inline (not module-level like do_export) since it just needs
+  -- THIS frame's take, already in scope here - no reason to thread it
+  -- through a module-level cache the way do_export does for the render
+  -- model. note_editor.revert_all's own return value (did it actually
+  -- change anything) passes straight through for ui_chrome.lua's status
+  -- message.
+  local function on_revert_all()
+    return note_editor.revert_all(take)
+  end
+
   -- ui_chrome.draw's return is a second, explicit cache-invalidation
   -- signal alongside the note-hash check below - tuning/capo edits never
   -- touch the MIDI take, so the hash alone would never notice them.
-  local settings_changed = ui_chrome.draw(ctx, config, take, do_export)
+  local settings_changed = ui_chrome.draw(ctx, config, take, do_export, on_revert_all)
 
   if hash ~= last_hash or settings_changed or take_settings_changed or pending_recompute then
     last_hash = hash
