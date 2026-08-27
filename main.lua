@@ -97,6 +97,7 @@ local draw_notation = require('draw_notation')
 local score_render = require('score_render')
 local ui_chrome = require('ui_chrome')
 local note_editor = require('note_editor')
+local measure_correction = require('measure_correction')
 local color_util = require('color_util')
 local pdf_export = require('pdf_export')
 
@@ -152,6 +153,15 @@ local last_take = nil
 local cached_render_model = nil
 local cached_measure_ticks = nil
 local cached_measure_info = nil
+-- fret_heuristic.assign_events' own output - the flat, pre-layout event
+-- list, kept around (unlike before measure_correction.lua existed, when
+-- it was a throwaway local) specifically so that module can work from
+-- real, un-split MIDI notes (stable .idx, exactly one entry per actual
+-- note) rather than cached_render_model, which layout_engine.compute can
+-- split into tied segments at barlines - see measure_correction.lua's
+-- header for why that distinction matters for its note-position matching
+-- and its MIDI_SetNote write-back.
+local cached_assigned_events = nil
 -- Set from the PREVIOUS frame's note_editor.end_frame return value (a
 -- technique commit happened) - note_editor.lua's popup interaction runs
 -- after this frame's own recompute check (it needs this frame's systems
@@ -211,6 +221,7 @@ local function main()
       local notes = midi_read.read_notes(take)
       local events = midi_read.group_into_events(notes)
       local assigned_events = fret_heuristic.assign_events(events)
+      cached_assigned_events = assigned_events
       -- Computed from assigned_events (not cached_render_model, which
       -- doesn't exist yet) since layout_engine.compute's tie inference
       -- needs per-measure meter data up front - measure_boundaries only
@@ -230,6 +241,7 @@ local function main()
       cached_render_model = nil
       cached_measure_ticks = nil
       cached_measure_info = nil
+      cached_assigned_events = nil
     end
   end
 
@@ -251,6 +263,23 @@ local function main()
     return
   end
 
+  -- Reads cached_assigned_events (this frame's already-current, since it's
+  -- reached after the recompute block above) rather than cached_render_
+  -- model - see measure_correction.lua's header for why. Drawn before the
+  -- systems loop below, which is where a click actually selects a measure
+  -- (measure_correction.check_system) - so a fresh selection shows up here
+  -- one frame later, imperceptible at normal frame rates (the same kind of
+  -- one-frame lag note_editor.lua's own technique-tag signal already
+  -- accepts - see that file's header).
+  measure_correction.draw_panel(ctx, take, cached_assigned_events, cached_measure_ticks, cached_measure_info)
+
+  -- No separate ImGui_Text block needed here for the guitar/tuning/key
+  -- summary: score_render.draw_header (below) already draws it on the
+  -- canvas, and that call runs in this SAME live-view frame too, not just
+  -- pdf_export.lua's print pass - see that file's header. It lands right
+  -- here, immediately below Measure Correction, since that's exactly where
+  -- origin_y (the score canvas's own top-left) falls once every widget
+  -- above it - including Measure Correction's own panel - has been drawn.
   local draw_list = reaper.ImGui_GetWindowDrawList(ctx)
   local origin_x, origin_y = reaper.ImGui_GetCursorScreenPos(ctx)
   local _, avail_h = reaper.ImGui_GetContentRegionAvail(ctx)
@@ -307,6 +336,7 @@ local function main()
   local beat_ticks_lookup = notation_model.beat_ticks_lookup(cached_measure_ticks, cached_measure_info)
 
   note_editor.begin_frame(ctx)
+  measure_correction.begin_frame(ctx)
 
   for s = 1, #systems do
     local system = systems[s]
@@ -322,6 +352,7 @@ local function main()
     local middle_c_y = origin_y + sys_top_local_y + geo.notation_above
     local tab_origin_y = middle_c_y + geo.notation_below + config.layout.staff_gap
     note_editor.check_system(origin_x, tab_origin_y, system.events)
+    measure_correction.check_system(origin_x, bar_top, bar_bottom, system)
 
     total_width = math.max(total_width, notation_width, tab_width)
 

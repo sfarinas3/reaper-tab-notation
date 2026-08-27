@@ -16,6 +16,7 @@
 
 local draw_notation = require('draw_notation')
 local draw_tab = require('draw_tab')
+local ui_chrome = require('ui_chrome')
 
 local M = {}
 
@@ -29,8 +30,17 @@ local TITLE_FONT_SCALE = 1.8 -- relative to the panel's base text size
 local SCORE_INFO_LINE_GAP = 2 -- px between the stacked composer/arranger lines
 local SCORE_HEADER_BOTTOM_GAP = 16 -- px between the header block and the first system's own reserved area
 
-local function has_header(cfg)
-  return (cfg.title and cfg.title ~= "") or (cfg.composer and cfg.composer ~= "") or (cfg.arranger and cfg.arranger ~= "")
+-- Guitar/tuning/key summary (ui_chrome.instrument_summary/current_key_
+-- label - the same two functions main.lua's own panel calls, so the
+-- printed header always matches what's shown on screen) as the three
+-- lines the header's left column stacks. Unlike title/composer/arranger,
+-- this is always present (a take always has SOME tuning/key, even if
+-- it's just the defaults) - the header block is drawn whether or not
+-- title/composer/arranger are ever set, contrary to this app's original
+-- "blank by default, no reserved space at all" header behavior.
+local function header_info_lines(cfg)
+  local title, tuning = ui_chrome.instrument_summary(cfg)
+  return { title, tuning, "Key: " .. ui_chrome.current_key_label(cfg) }
 end
 
 -- Computes everything about vertical layout that has to be known BEFORE
@@ -45,20 +55,26 @@ function M.layout_geometry(ctx, cfg)
   local system_pitch = notation_above + notation_below + cfg.layout.staff_gap + tab_staff_height + cfg.layout.system_gap
 
   local base_font_size = reaper.ImGui_GetFontSize(ctx)
-  local header_height = 0
-  if has_header(cfg) then
-    local title_h = (cfg.title and cfg.title ~= "") and (base_font_size * TITLE_FONT_SCALE) or 0
-    local side_h = 0
-    if cfg.composer and cfg.composer ~= "" then
-      local _, h = reaper.ImGui_CalcTextSize(ctx, cfg.composer)
-      side_h = side_h + h
-    end
-    if cfg.arranger and cfg.arranger ~= "" then
-      local _, h = reaper.ImGui_CalcTextSize(ctx, "arr. " .. cfg.arranger)
-      side_h = side_h + ((cfg.composer and cfg.composer ~= "") and (h + SCORE_INFO_LINE_GAP) or h)
-    end
-    header_height = math.max(title_h, side_h) + SCORE_HEADER_BOTTOM_GAP
+
+  local title_h = (cfg.title and cfg.title ~= "") and (base_font_size * TITLE_FONT_SCALE) or 0
+
+  local right_h = 0
+  if cfg.composer and cfg.composer ~= "" then
+    local _, h = reaper.ImGui_CalcTextSize(ctx, cfg.composer)
+    right_h = right_h + h
   end
+  if cfg.arranger and cfg.arranger ~= "" then
+    local _, h = reaper.ImGui_CalcTextSize(ctx, "arr. " .. cfg.arranger)
+    right_h = right_h + ((cfg.composer and cfg.composer ~= "") and (h + SCORE_INFO_LINE_GAP) or h)
+  end
+
+  local left_h = 0
+  for i, line in ipairs(header_info_lines(cfg)) do
+    local _, h = reaper.ImGui_CalcTextSize(ctx, line)
+    left_h = left_h + h + (i > 1 and SCORE_INFO_LINE_GAP or 0)
+  end
+
+  local header_height = math.max(title_h, right_h, left_h) + SCORE_HEADER_BOTTOM_GAP
 
   return {
     notation_above = notation_above,
@@ -77,13 +93,11 @@ function M.layout_geometry(ctx, cfg)
   }
 end
 
--- Draws the title (centered, enlarged) and composer/arranger (stacked,
--- top-right) at (origin_x, origin_y) within max_width - a no-op (draws
--- nothing) if none of the three are set, matching config.lua's "blank by
--- default, no visual change" intent.
+-- Draws the title (centered, enlarged), composer/arranger (stacked,
+-- top-right - blank/absent if never set, same as before), and the guitar/
+-- tuning/key summary (stacked, top-left - see header_info_lines, always
+-- drawn) at (origin_x, origin_y) within max_width.
 function M.draw_header(ctx, draw_list, origin_x, origin_y, cfg, max_width, color_fg, color_dim)
-  if not has_header(cfg) then return end
-
   local base_font_size = reaper.ImGui_GetFontSize(ctx)
 
   if cfg.title and cfg.title ~= "" then
@@ -104,6 +118,13 @@ function M.draw_header(ctx, draw_list, origin_x, origin_y, cfg, max_width, color
     local arranger_text = "arr. " .. cfg.arranger
     local w = reaper.ImGui_CalcTextSize(ctx, arranger_text)
     reaper.ImGui_DrawList_AddText(draw_list, origin_x + max_width - w, side_y, color_dim, arranger_text)
+  end
+
+  local left_y = origin_y
+  for _, line in ipairs(header_info_lines(cfg)) do
+    local _, h = reaper.ImGui_CalcTextSize(ctx, line)
+    reaper.ImGui_DrawList_AddText(draw_list, origin_x, left_y, color_dim, line)
+    left_y = left_y + h + SCORE_INFO_LINE_GAP
   end
 end
 

@@ -66,15 +66,18 @@
 --   - Palm mute (velocity 1-63): standard tab convention marks a palm-
 --     muted passage with "P.M." at its start and a dashed line spanning
 --     the muted notes, drawn BELOW the fret numbers - see
---     PALM_MUTE_VELOCITY_MAX and the per-string run tracking
---     (pm_active_by_string/pm_last_muted_x) in M.draw, which mirrors how
---     ties/let-ring already track continuity per string. A run only
---     breaks on a same-string note that ISN'T in the muted velocity range
---     (or the string simply stops being played) - it does NOT try to
---     bridge across a different string, so a muted passage that hops
---     strings gets one "P.M." label per string rather than one continuous
---     bracket, the same kind of per-string simplification this file's tie
---     handling already accepts.
+--     PALM_MUTE_VELOCITY_MAX and the run tracking (pm_active/pm_last_x) in
+--     M.draw. Unlike ties/let-ring (genuinely per-string, since each
+--     string can independently be mid-sustain), palm muting is a
+--     right-hand technique applied to a whole passage/chord at once, so
+--     this tracks ONE run for the whole staff, not one per string: each
+--     event contributes at most one label/line, drawn at pm_row_string
+--     (that event's bottom-most muted string, so a muted chord's several
+--     simultaneously-muted notes get exactly one "P.M."/one dash, not one
+--     stacked per note). The run breaks the instant an event has no muted
+--     note at all (pm_row_string is nil that event) - so the dashed line's
+--     length always matches an actually-consecutive run of muted events,
+--     never spanning a gap where nothing was muted.
 --   - Pinch harmonic (velocity 127, the MIDI maximum): marked "P.H."
 --     above the fret number - unlike palm muting this is a single-note
 --     technique, not a sustained passage, so it needs no run-tracking of
@@ -305,15 +308,42 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks,
   local is_shamisen = config.instrument == "Shamisen"
   local is_guitar = config.instrument == "Guitar"
   local last_x_by_string = {}
-  -- Palm-mute run tracking, per string - mirrors last_x_by_string's own
-  -- per-string continuity model (see this file's header for why a run
-  -- doesn't try to bridge across a different string).
-  local pm_active_by_string = {}
-  local pm_last_muted_x = {}
+  -- Palm-mute run tracking: ONE state for the whole staff, not per string -
+  -- palm muting is a right-hand technique applied to a passage/chord as a
+  -- whole, not a per-string articulation, so a chord where several strings
+  -- are muted at once gets exactly one "P.M." label and one connecting
+  -- dashed line (at pm_row_string, the bottom-most muted string in each
+  -- event - see below), never one per string. pm_active tracks whether the
+  -- IMMEDIATELY PRECEDING event (in this system) was itself a muted event;
+  -- an event with no muted note at all (pm_row_string == nil, below) clears
+  -- it, so the line's span always matches actually-consecutive muted
+  -- events, not however long ago some particular string was last muted.
+  local pm_active = false
+  local pm_last_x = nil
 
   for i = 1, #render_model do
     local event = render_model[i]
     local x = origin_x + event.x
+
+    -- The bottom-most (highest string index) muted note in this event, or
+    -- nil if this event has no muted note at all - scanned up front so the
+    -- per-note loop below can draw this event's single P.M. label/line
+    -- exactly once, at a fixed row, regardless of note order within the
+    -- chord.
+    local pm_row_string = nil
+    if is_guitar then
+      for j = 1, #event.notes do
+        local note = event.notes[j]
+        if note.string and note.vel and note.vel >= 1 and note.vel <= PALM_MUTE_VELOCITY_MAX then
+          if not pm_row_string or note.string > pm_row_string then
+            pm_row_string = note.string
+          end
+        end
+      end
+      if not pm_row_string then
+        pm_active = false
+      end
+    end
 
     for j = 1, #event.notes do
       local note = event.notes[j]
@@ -392,10 +422,12 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks,
       -- Guitar-only auto-detected techniques, from the note's own recorded
       -- velocity - see this file's header for the full rationale and the
       -- two velocity ranges. Pinch harmonic is a single-note marker (no
-      -- run-tracking needed); palm mute is a per-string run, continuing
-      -- the dashed line from the previous muted note on the SAME string
-      -- (pm_last_muted_x) or starting a fresh "P.M." label if this is the
-      -- first muted note since that string's last non-muted one.
+      -- run-tracking needed) and stays per-note - a chord with more than
+      -- one pinch harmonic at once is rare enough not to warrant the same
+      -- collapsing treatment palm mute needs. Palm mute itself draws
+      -- exactly once per muted event, at pm_row_string's row (computed
+      -- above, before this loop) - see this file's header and the
+      -- pm_active comment above for why this is event-level, not per-note.
       if is_guitar and note.string then
         if note.vel == PINCH_HARMONIC_VELOCITY then
           local text = "P.H."
@@ -403,19 +435,17 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks,
           reaper.ImGui_DrawList_AddText(draw_list, x - tw / 2, y - h / 2 - PH_ABOVE_GAP - th, COLOR_TECHNIQUE, text)
         end
 
-        if note.vel and note.vel >= 1 and note.vel <= PALM_MUTE_VELOCITY_MAX then
+        if note.string == pm_row_string then
           local pm_y = y + h / 2 + PM_BELOW_GAP
-          if pm_active_by_string[note.string] then
-            draw_let_ring_line(draw_list, pm_last_muted_x[note.string], x, pm_y, COLOR_TECHNIQUE)
+          if pm_active then
+            draw_let_ring_line(draw_list, pm_last_x, x, pm_y, COLOR_TECHNIQUE)
           else
             local text = "P.M."
             local tw, th = reaper.ImGui_CalcTextSize(ctx, text)
             reaper.ImGui_DrawList_AddText(draw_list, x - tw / 2, pm_y - th / 2, COLOR_TECHNIQUE, text)
           end
-          pm_active_by_string[note.string] = true
-          pm_last_muted_x[note.string] = x
-        else
-          pm_active_by_string[note.string] = false
+          pm_active = true
+          pm_last_x = x
         end
       end
 

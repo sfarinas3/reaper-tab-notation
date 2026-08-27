@@ -188,6 +188,20 @@ local function key_label(k)
   return string.format("%s major / %s minor (%d%s)", k.name, k.relative_minor, n, symbol)
 end
 
+-- The exact key-signature wording for cfg.key_count - shared by M.draw's
+-- own "Key Signature" summary line and score_render.lua's printed score
+-- header (M.instrument_summary/this together are the "guitar, tuning, and
+-- key" info both places show), so the two never disagree about how a key
+-- is described.
+function M.current_key_label(cfg)
+  local current = nil
+  for _, k in ipairs(notation_model.KEYS) do
+    if k.count == (cfg.key_count or 0) then current = k end
+  end
+  current = current or notation_model.KEYS[1]
+  return key_label(current)
+end
+
 -- config.layout.left_margin has to grow with the key signature's own
 -- width (more accidentals = more room needed before the first note) -
 -- draw_notation.lua owns the actual glyph geometry that determines how
@@ -488,13 +502,13 @@ end
 -- see config.lua's header) in its own "Score Info" section, first since
 -- it's the score's own identity; then instrument
 -- preset, string count, tuning preset dropdown, per-string note-name
--- fields, capo, max fret, key signature; plus an always-visible
--- instrument/tuning/key summary right below both
--- dropdowns (M.instrument_summary for the first two lines, a third "Key: "
--- line reusing key_label so its wording always matches the Key Signature
--- dropdown's own options) - outside either collapsible section, so it
--- stays visible even with both collapsed. Returns true if anything
--- changed this frame - callers should treat that as "please recompute,"
+-- fields, capo, max fret, key signature. The instrument/tuning/key summary
+-- itself (M.instrument_summary/M.current_key_label) is drawn by the
+-- CALLER, not here - main.lua draws it below its own Measure Correction
+-- section, and score_render.lua's printed header reuses the exact same two
+-- functions, so every place this info shows up is worded identically.
+-- Returns true if anything changed this frame - callers should treat that
+-- as "please recompute,"
 -- alongside their own note-hash check (see header comment: none of these
 -- settings touch the MIDI take, so a hash check alone never notices them).
 -- take: the currently active take (may be nil, e.g. nothing selected) -
@@ -702,17 +716,6 @@ function M.draw(ctx, cfg, take, on_export)
     cfg.show_note_names = new_show_note_names
     changed = true
   end
-
-  reaper.ImGui_Separator(ctx)
-  local instrument_title, instrument_tuning = M.instrument_summary(cfg)
-  reaper.ImGui_Text(ctx, instrument_title)
-  reaper.ImGui_Text(ctx, instrument_tuning)
-  local summary_key = nil
-  for _, k in ipairs(notation_model.KEYS) do
-    if k.count == (cfg.key_count or 0) then summary_key = k end
-  end
-  summary_key = summary_key or notation_model.KEYS[1]
-  reaper.ImGui_Text(ctx, "Key: " .. key_label(summary_key))
 
   if changed then
     M.save_persisted(cfg)
