@@ -186,37 +186,6 @@ local function intrinsic_cost(state)
   return cost
 end
 
--- The pitch a candidate assignment actually produces - reconstructed from
--- string/fret rather than carried on the state itself (states only ever
--- store {string, fret}, never pitch - see generate_event_states).
-local function assignment_pitch(assign)
-  return config.tuning[assign.string] + config.capo + assign.fret
-end
-
--- Extra cost for changing strings across a WIDE pitch leap (config.
--- weights.wide_leap_semitones/wide_leap_string_change_penalty - see their
--- own comments in config.lua for the full reasoning). Scoped to single-
--- note states only (a chord isn't a "leap" in this sense), and only
--- fires when a same-string alternative actually exists within max_fret -
--- if the previous note's string can't reach this pitch at all, the DP
--- never had that option, so there's nothing to penalize choosing instead.
-local function wide_leap_cost(prev_state, state)
-  if #prev_state ~= 1 or #state ~= 1 then return 0 end
-  local prev, cur = prev_state[1], state[1]
-  if not prev or not cur then return 0 end
-  if prev.string == cur.string then return 0 end
-
-  local w = config.weights
-  local cur_pitch = assignment_pitch(cur)
-  local interval = math.abs(cur_pitch - assignment_pitch(prev))
-  if interval < w.wide_leap_semitones then return 0 end
-
-  local same_string_fret = cur_pitch - (config.tuning[prev.string] + config.capo)
-  if same_string_fret < 0 or same_string_fret > config.max_fret then return 0 end
-
-  return w.wide_leap_string_change_penalty
-end
-
 -- Cost of moving from prev_state's hand position/strings to state's.
 local function transition_cost(prev_state, state)
   local w = config.weights
@@ -231,8 +200,6 @@ local function transition_cost(prev_state, state)
   if prev_str and str then
     cost = cost + math.abs(str - prev_str) * w.string_change_weight
   end
-
-  cost = cost + wide_leap_cost(prev_state, state)
 
   return cost
 end
