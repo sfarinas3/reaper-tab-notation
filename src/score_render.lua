@@ -30,17 +30,27 @@ local TITLE_FONT_SCALE = 1.8 -- relative to the panel's base text size
 local SCORE_INFO_LINE_GAP = 2 -- px between the stacked composer/arranger lines
 local SCORE_HEADER_BOTTOM_GAP = 16 -- px between the header block and the first system's own reserved area
 
--- Guitar/tuning/key summary (ui_chrome.instrument_summary/current_key_
--- label - the same two functions main.lua's own panel calls, so the
--- printed header always matches what's shown on screen) as the three
--- lines the header's left column stacks. Unlike title/composer/arranger,
--- this is always present (a take always has SOME tuning/key, even if
--- it's just the defaults) - the header block is drawn whether or not
--- title/composer/arranger are ever set, contrary to this app's original
--- "blank by default, no reserved space at all" header behavior.
+-- Guitar/tuning summary (ui_chrome.instrument_summary - the same function
+-- main.lua's own panel calls, so the printed header always matches what's
+-- shown on screen) as the lines the header's left column stacks. Unlike
+-- title/composer/arranger, this is always present (a take always has SOME
+-- tuning, even if it's just the defaults) - the header block is drawn
+-- whether or not title/composer/arranger are ever set, contrary to this
+-- app's original "blank by default, no reserved space at all" header
+-- behavior.
+--
+-- The key signature line is the one exception - omitted by default and
+-- only added when cfg.show_note_names is on. Key info is mainly useful
+-- alongside the per-note names that checkbox already prints on the score
+-- itself (why a note is spelled the way it is), so it's tied to the same
+-- toggle rather than always taking up header space.
 local function header_info_lines(cfg)
   local title, tuning = ui_chrome.instrument_summary(cfg)
-  return { title, tuning, "Key: " .. ui_chrome.current_key_label(cfg) }
+  local lines = { title, tuning }
+  if cfg.show_note_names then
+    lines[#lines + 1] = "Key: " .. ui_chrome.current_key_label(cfg)
+  end
+  return lines
 end
 
 -- Computes everything about vertical layout that has to be known BEFORE
@@ -95,8 +105,9 @@ end
 
 -- Draws the title (centered, enlarged), composer/arranger (stacked,
 -- top-right - blank/absent if never set, same as before), and the guitar/
--- tuning/key summary (stacked, top-left - see header_info_lines, always
--- drawn) at (origin_x, origin_y) within max_width.
+-- tuning (plus key, when cfg.show_note_names is on) summary (stacked,
+-- top-left - see header_info_lines) at (origin_x, origin_y) within
+-- max_width.
 function M.draw_header(ctx, draw_list, origin_x, origin_y, cfg, max_width, color_fg, color_dim)
   local base_font_size = reaper.ImGui_GetFontSize(ctx)
 
@@ -169,7 +180,7 @@ function M.draw_system(ctx, draw_list, origin_x, origin_y, sys_top_local_y, cfg,
     ctx, draw_list, origin_x, middle_c_y, system.events, beat_ticks_lookup, system.ticks, time_sig, system.barline_x)
 
   local tab_origin_y = middle_c_y + geo.notation_below + cfg.layout.staff_gap
-  local tab_width = draw_tab.draw(ctx, draw_list, origin_x, tab_origin_y, system.events, system.ticks, system.barline_x)
+  local tab_width = draw_tab.draw(ctx, draw_list, origin_x, tab_origin_y, system.events, beat_ticks_lookup, system.ticks, system.barline_x)
 
   -- Barlines span the full height (notation staff down through tab), a
   -- single continuous line unifying the two staves.

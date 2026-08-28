@@ -520,7 +520,7 @@ function M.group_beams(render_model, beat_ticks_lookup)
     last_event_end = event.tick + event.duration_ticks
 
     if not event.is_grace then
-      local is_beamable = event.duration_ticks < config.layout.ppq_per_quarter
+      local is_beamable = event.notated_ticks < config.layout.ppq_per_quarter
       local beat_index = math.floor(event.tick / beat_ticks_lookup(event.tick))
 
       if is_beamable and current and beat_index == current_beat and not has_rest_gap then
@@ -537,6 +537,157 @@ function M.group_beams(render_model, beat_ticks_lookup)
   flush()
 
   return groups
+end
+
+local TUPLET_TICK_TOLERANCE = 15 -- ticks - looser than layout_engine's TIE_DURATION_TOLERANCE
+-- (10): each shape's onsets carry their own independent recording jitter,
+-- so slop compounds across multiple inter-onset gaps instead of just 1.
+
+-- Candidate shapes M.detect_tuplets recognizes. count = actual note onsets
+-- per instance (the printed numerator). ratio_den = how many plain notes
+-- of the resulting notated value would normally fill the same span (the
+-- printed denominator) - nominal_ticks for one member is always
+-- span / ratio_den. beats = how many beat_ticks-lengths the whole group
+-- spans (1 = within one beat, 2 = a beat-pair) - a 1-beat shape's members
+-- are beamable and land together in one beat, so draw_notation.lua's own
+-- beam-grouping check finds them all sharing one beam and draws a bare
+-- numeral, no bracket; a 2-beat shape's members either aren't beamable at
+-- all (quarter-triplet) or get split across two separate per-beat beam
+-- groups (nonuplet/11/13-tuplet, since beaming never spans more than one
+-- beat), so those draw a bracket instead - see draw_notation.lua's own
+-- Pass 2.5 comment. The standalone 1-beat sextuplet below (6:4) is a
+-- DIFFERENT, faster shape than a hypothetical 2-beat pair of eighth-
+-- triplet beats - Pass 1's span-window check tells them apart on timing
+-- alone, since a true 1-beat sextuplet's 6 notes are packed twice as
+-- tight. Deliberately excludes quintuplets (5:4) - not requested, left out
+-- on purpose, not an oversight.
+M.TUPLET_SHAPES = {
+  { count = 3, ratio_den = 2, beats = 1 },  -- eighth-triplet
+  { count = 3, ratio_den = 2, beats = 2 },  -- quarter-triplet
+  { count = 6, ratio_den = 4, beats = 1 },  -- sextuplet (6 in the space of 4, ONE beat)
+  { count = 7, ratio_den = 4, beats = 1 },  -- septuplet (7 in the space of 4)
+  { count = 9, ratio_den = 8, beats = 2 },  -- nonuplet (9 in the space of 8)
+  { count = 11, ratio_den = 8, beats = 2 },
+  { count = 13, ratio_den = 8, beats = 2 },
+}
+
+-- Detects tuplets (M.TUPLET_SHAPES) from raw MIDI timing - there is no
+-- explicit tuplet flag in MIDI, so this is a best-effort heuristic in the
+-- same spirit as layout_engine.lua's has_clean_duration tie inference, and
+-- reuses the same beat-relative machinery (beat_ticks_lookup) rather than
+-- a second one.
+--
+-- Only the shapes listed in M.TUPLET_SHAPES are recognized. It will NOT
+-- catch: swung/unevenly-spaced runs (the even-spacing check below rejects
+-- them), a shape that doesn't start on a beat boundary, a shape spanning a
+-- rest, nested tuplets, ratios not in M.TUPLET_SHAPES (quintuplets,
+-- compound-meter duplets/quadruplets - see that table's own comment for
+-- why), or a shape that happens to cross a barline (layout_engine.
+-- compute's existing barline-split logic will split one of its notated
+-- segments, and the rendering pass doesn't reconcile that - a rare,
+-- unhandled edge case, not specially suppressed here). For any 2-beat
+-- shape (quarter-triplet, nonuplet, 11/13-tuplet), the beat-
+-- alignment check only confirms the group starts on *a* beat, not
+-- specifically the first beat of a beat-pair (true beat-pair parity isn't
+-- checked). These are accepted trade-offs, not oversights - see this
+-- project's own prior framing of full tuplet detection as disproportionate
+-- to its scope; this only handles the common, cleanly-quantized cases.
+--
+-- Each detected group is always displayed on its own - a consecutive run
+-- of the same shape (e.g. several eighth-triplet beats in a row) is NOT
+-- merged into one shared bracket spanning multiple beats; each instance
+-- gets its own numeral/bracket. This deliberately matches standard
+-- engraving practice more closely than a merged bracket would: a 1-beat
+-- shape's members share one beam already (see M.TUPLET_SHAPES' own
+-- comment), so drawing needs nothing more than a bare numeral per group,
+-- same as any other beamed passage; a 2-beat shape genuinely needs its own
+-- bracket since its members don't share one beam, but that's true of that
+-- ONE instance on its own merit, not because it was stitched to a
+-- neighbor.
+--
+-- Returns function(tick) -> {id, index, count, ratio_num, ratio_den,
+-- nominal_ticks} or nil. Unlike beat_ticks_lookup, this is a direct table
+-- lookup (built once, up front) rather than a range search over a moving
+-- pointer, so - unlike beat_ticks_lookup - callers do NOT need to query it
+-- with monotonically increasing ticks.
+function M.detect_tuplets(events, beat_ticks_lookup)
+  local by_tick = {}
+  local claimed = {}
+  local next_id = 1
+
+  local function event_end(event)
+    local e = event.tick
+    for i = 1, #event.notes do
+      if event.notes[i].endppq and event.notes[i].endppq > e then e = event.notes[i].endppq end
+    end
+    return e
+  end
+
+  -- Pass 1: variable-window shape matching, generalizing what used to be a
+  -- fixed-3-events loop into a per-shape count. Greedy left-to-right: the
+  -- first shape that matches at a given starting position claims its
+  -- events and the scan moves on, same non-overlapping precedent the
+  -- original triplet-only version already used. Different shapes rarely
+  -- risk colliding at the same start position in practice - each has a
+  -- distinct count/span signature, so a partial match of a longer shape
+  -- (e.g. the first 3 notes of a real septuplet) fails the shorter shape's
+  -- own span-window check by a wide margin, not just outside tolerance.
+  for i = 1, #events do
+    if not claimed[i] then
+      for _, shape in ipairs(M.TUPLET_SHAPES) do
+        local n = shape.count
+        if i + n - 1 <= #events then
+          local blocked = false
+          for k = i, i + n - 1 do
+            if claimed[k] then blocked = true break end
+          end
+
+          if not blocked then
+            local e0 = events[i]
+            local beat_ticks = beat_ticks_lookup(e0.tick)
+            local window = beat_ticks * shape.beats
+            local last = events[i + n - 1]
+            -- Written duration = time to the next onset (or, for the last
+            -- member, its own sustain) - the same "read as" convention
+            -- layout_engine.compute's own gap-capping uses, so the two
+            -- passes agree on what a note's effective length means.
+            local span_end = events[i + n] and events[i + n].tick or event_end(last)
+            local span = span_end - e0.tick
+
+            if math.abs(span - window) <= TUPLET_TICK_TOLERANCE
+                and math.abs(e0.tick % beat_ticks) <= TUPLET_TICK_TOLERANCE then
+              local slice = span / n
+              local even, no_rest_gap = true, true
+              for k = i, i + n - 1 do
+                local expected = e0.tick + (k - i) * slice
+                if math.abs(events[k].tick - expected) > TUPLET_TICK_TOLERANCE then even = false end
+                if k > i and event_end(events[k - 1]) < events[k].tick - TUPLET_TICK_TOLERANCE then
+                  no_rest_gap = false
+                end
+              end
+              if event_end(last) < span_end - TUPLET_TICK_TOLERANCE then no_rest_gap = false end
+
+              if even and no_rest_gap then
+                local nominal_ticks = span / shape.ratio_den
+                local id = next_id
+                next_id = next_id + 1
+                for k = i, i + n - 1 do
+                  claimed[k] = true
+                  by_tick[events[k].tick] = {
+                    id = id, index = k - i + 1, count = n,
+                    ratio_num = n, ratio_den = shape.ratio_den, nominal_ticks = nominal_ticks,
+                  }
+                end
+                break -- this shape matched at i; stop trying other shapes here
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  return function(tick) return by_tick[tick] end
 end
 
 -- Barline ticks strictly between start and finish - the same rule
@@ -565,12 +716,36 @@ end
 -- Detects gaps in render_model's timeline - a note-event ending before the
 -- next one starts, or before the first note if leading_tick is given (e.g.
 -- the first barline, so leading silence within the first measure shows a
--- rest too) - and classifies each into the largest standard duration that
--- fits within it. A greedy, single-symbol classification: an irregular
--- gap that doesn't cleanly match one duration class will under-represent
--- its true length rather than being decomposed into multiple rest
--- symbols (e.g. a dotted rest, or a tied pair) - an accepted
--- simplification at this scope.
+-- rest too) - and decomposes each into a SEQUENCE of one or more standard-
+-- duration rest symbols (see add_gap below) that together account for the
+-- gap's full length, not just a single symbol that may fall short. Each
+-- step of that sequence picks the largest standard duration (a plain
+-- class, or that class's own dotted/1.5x equivalent - see classify below)
+-- that fits the remaining, not-yet-covered part of the gap, then repeats
+-- on whatever's left - e.g. 2.5 beats of silence becomes a half rest (2
+-- beats) followed by an eighth rest (0.5 beats), not a single half rest
+-- that silently drops the last eighth. Only stops leaving a genuine
+-- remainder when what's left is smaller than the smallest recognized
+-- class (a 64th note) - real MIDI timing imprecision, not an actual
+-- fraction of a beat going unaccounted for.
+--
+-- Beat-boundary-aware spelling (beat_ticks_lookup, optional - same
+-- function(tick) -> beat_ticks signature M.beat_ticks_lookup/M.group_beams
+-- already use): while a rest_start isn't itself sitting on a beat boundary
+-- (within REST_BEAT_ALIGN_TOLERANCE, matching this file's other
+-- imprecise-real-MIDI-timing tolerances), each step is additionally capped
+-- at whatever's left of the CURRENT beat, so a rest is never chosen so
+-- large it would swallow a beat boundary it didn't start on - e.g. 2.5
+-- beats of silence starting mid-beat-2 becomes an eighth rest (filling out
+-- beat 2) followed by a half rest (beats 3-4 exactly), not a half rest
+-- that happens to sum to the right total but splits at an arbitrary
+-- mid-beat point instead. Once a rest_start IS beat-aligned, the cap lifts
+-- entirely - a half or whole rest starting cleanly on a beat is normal,
+-- expected notation even though it spans multiple beats itself. Omitting
+-- beat_ticks_lookup reproduces the old beat-UNaware greedy behavior
+-- exactly (still fully accounts for the gap's length, just without
+-- preferring beat-aligned breaks) - every existing caller passes it, so
+-- this is only a fallback for tests/future callers that don't have one.
 --
 -- measure_ticks (optional, same array layout_engine.compute's opts.
 -- measure_ticks and M.measure_boundaries both use): when given, a gap is
@@ -610,14 +785,32 @@ end
 -- rendered with no rests whatsoever - handled as its own early-return case
 -- using measure_ticks' full span.
 -- Returns a list of {tick, duration_ticks, whole_measure}.
-function M.detect_rests(render_model, leading_tick, measure_ticks)
+local REST_BEAT_ALIGN_TOLERANCE = 10 -- ticks - matches layout_engine's TIE_DURATION_TOLERANCE scale
+function M.detect_rests(render_model, leading_tick, measure_ticks, beat_ticks_lookup)
   local rests = {}
   local classes = config.layout.duration_classes -- ascending by ticks
 
+  -- Largest fitting value among BOTH the plain classes and each one's own
+  -- dotted (1.5x) equivalent - e.g. a 1440-tick gap (a dotted quarter's
+  -- worth of silence) now classifies as 1440 (draw_notation.lua's
+  -- is_dotted_duration then recognizes it and adds the augmentation dot),
+  -- not as a plain 960-tick quarter rest that silently drops the extra 480
+  -- ticks. The smallest class (index 1, the 64th) has no dotted variant
+  -- checked, matching M.is_dotted_duration's own recognized floor (it
+  -- starts at the 32nd) - a dotted-64th isn't a value either function
+  -- treats as dotted. Each class's own dotted value (1.5x) is always less
+  -- than the NEXT class's plain value (2x), so checking plain-then-dotted
+  -- per class while walking classes in ascending order still visits every
+  -- candidate in true ascending numeric order overall - no separate sort
+  -- needed for "best" to end up as the actual largest fit.
   local function classify(gap_ticks)
     local best = nil
-    for _, c in ipairs(classes) do
+    for i, c in ipairs(classes) do
       if c.ticks <= gap_ticks then best = c.ticks end
+      if i > 1 then
+        local dotted = c.ticks * 1.5
+        if dotted <= gap_ticks then best = dotted end
+      end
     end
     return best
   end
@@ -643,9 +836,39 @@ function M.detect_rests(render_model, leading_tick, measure_ticks)
           whole_measure = true,
         })
       else
-        local duration = classify(seg_end - seg_start)
-        if duration then
-          table.insert(rests, { tick = seg_start, duration_ticks = duration })
+        -- Greedily decompose this segment into consecutive rest symbols
+        -- (largest-fits-first, repeated on whatever's left) so the whole
+        -- segment is always accounted for - see this function's own
+        -- header for why a single classify() call alone isn't enough.
+        -- Beat-aware: while rest_start isn't itself on a beat boundary,
+        -- each step is also capped at whatever's left of the current beat
+        -- (measure_start as the beat grid's own anchor, falling back to
+        -- tick 0 if measure_ticks wasn't given), so a rest symbol never
+        -- swallows a beat boundary it didn't start on - see this
+        -- function's own header for the worked example.
+        local rest_start = seg_start
+        local remaining = seg_end - seg_start
+        local smallest = classes[1].ticks
+        while remaining >= smallest do
+          local cap = remaining
+          if beat_ticks_lookup then
+            local beat_ticks = beat_ticks_lookup(rest_start)
+            if beat_ticks and beat_ticks > 0 then
+              local offset = (rest_start - (measure_start or 0)) % beat_ticks
+              if offset > REST_BEAT_ALIGN_TOLERANCE then
+                cap = math.min(cap, beat_ticks - offset)
+              end
+            end
+          end
+          -- Falls back to the full (uncapped) remaining if the beat-boundary
+          -- cap is too tight for even the smallest class to fit - still
+          -- makes forward progress rather than stalling, at the cost of
+          -- that one symbol not being beat-aligned.
+          local duration = classify(cap) or classify(remaining)
+          if not duration then break end
+          table.insert(rests, { tick = rest_start, duration_ticks = duration })
+          rest_start = rest_start + duration
+          remaining = remaining - duration
         end
       end
 

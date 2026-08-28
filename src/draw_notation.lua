@@ -24,8 +24,8 @@
 -- reusing layout_engine's tied_from_prev flag - unlike the tab staff, the
 -- tied note still gets its own full notehead/stem, matching real
 -- notation) and rests (detected as gaps in the timeline by
--- notation_model.detect_rests, greedily classified into a single standard
--- duration rather than decomposed exactly - see that function's comment).
+-- notation_model.detect_rests, decomposed into a beat-aware sequence of
+-- standard rest symbols - see that function's own comment).
 -- Rest glyphs are simplified stand-ins (rectangles/zigzag/hook), not true
 -- engraved shapes, same pragmatic choice as the accidental symbols. No
 -- tuplet brackets - punted per the plan's own "lowest priority" framing,
@@ -139,6 +139,10 @@ local HALF_NOTE_TICKS = config.layout.ppq_per_quarter * 2
 local HOLLOW_NOTEHEAD_THICKNESS = 1.5 -- px stroke weight for half/whole notes' open notehead (vs. a quarter-or-shorter's filled one)
 local FLAG_SPACING = 6 -- px between stacked flags along a stem, for 16th/32nd/64th notes
 local BEAM_BAR_GAP = 4 -- px between stacked parallel beam bars, for 16th/32nd/64th beamed groups
+local TUPLET_NUMERAL_GAP = 6 -- px between the beam/bracket and the tuplet number text
+local TUPLET_BRACKET_HOOK_LEN = 5 -- px length of each bracket end-hook
+local TUPLET_BRACKET_CLEARANCE = 4 -- px minimum gap between the bracket line and whatever beam/stem it clears
+local TUPLET_FONT_SCALE = 1.1 -- tuplet number text size relative to the base font
 local LET_RING_GAP = 3 -- px between the notehead's edge and where the let-ring dashing starts
 local LET_RING_DASH_LEN = 4 -- px length of each dash
 local LET_RING_GAP_LEN = 3 -- px gap between dashes
@@ -151,7 +155,7 @@ local TIE_STUB_REACH = 16 -- px a system-crossing tie's incoming half reaches ba
 local REST_RECT_W, REST_RECT_H = 8, 4 -- whole/half rest rectangle size
 local DOT_RADIUS = 1.5 -- px, an augmentation dot (dotted note/rest)
 local DOT_GAP = 4 -- px between a notehead/rest glyph's own right edge and its dot
-local NOTE_NAME_GAP = 4 -- px between a note's rightmost drawn edge (notehead, or its dot if dotted) and its "Show Note Names" cheat-sheet text
+local NOTE_NAME_GAP = 4 -- px between a notehead's own radius and its "Show Note Names" cheat-sheet text, on whichever side (above/below) is away from the stem
 local BRACE_X_OFFSET = 6 -- px left of the staff lines' start where the brace sits
 local BRACE_BULGE = 8 -- px further left the brace bulges at its midpoint
 local CLEF_X_OFFSET = 4 -- px right of the staff start where the clef sits
@@ -668,6 +672,54 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
   -- since that's what tied_from_prev was computed against.
   local last_notehead_by_string = {}
   local last_staff_by_string = {}
+
+  -- Legato runs (see the legato_from_prev handling below): a slur spanning
+  -- 3+ notes is ONE continuous arc over the whole run in real notation, not
+  -- one small arc per consecutive pair (unlike a tie repeated across
+  -- several same-pitch notes, which genuinely IS drawn as separate
+  -- pairwise arcs - that distinction is why this needs its own tracking
+  -- rather than reusing the tie arc's one-shot draw). open_legato_run[string]
+  -- accumulates every note position in the currently-open run for that
+  -- string; closed (moved into pending_legato_arcs) the moment a note on
+  -- that string DOESN'T continue it, or at the end of this system if the
+  -- run is still open there (see the flush after the main loop below) -
+  -- the same known cross-system gap the per-pair version already had.
+  --
+  -- Drawing itself is DEFERRED to after Pass 2 below, rather than done
+  -- immediately here - a real, once-live bug: the arc's side (above/below)
+  -- needs the DESTINATION note's real, AS-DRAWN stem direction, but that's
+  -- decided by Pass 2 from the note's whole BEAM GROUP's collective pitch
+  -- extremes (event_staff[...].direction, standard "farthest notehead from
+  -- the middle line wins" rule - see Pass 2's own comment), which isn't
+  -- known yet at this point in the file. A quick per-note guess (just this
+  -- one note's own y vs. the middle line) agrees with the group's real
+  -- decision for an isolated single note, but a legato run commonly spans
+  -- an ascending/descending phrase inside ONE beam group, where the
+  -- group's actual farthest-from-middle member can be a DIFFERENT note
+  -- than the one the arc ends on - so the quick guess can pick the wrong
+  -- side relative to what's actually drawn. pending_legato_arcs just
+  -- records each closed run's points plus which event/staff to read the
+  -- real direction from once Pass 2 has resolved it.
+  local open_legato_run = {}
+  local pending_legato_arcs = {}
+
+  -- "Show Note Names" cheat sheet (config.show_note_names, see below in
+  -- Pass 1) - drawing is ALSO deferred to after Pass 2, same reasoning as
+  -- pending_legato_arcs immediately above: the user wants each name on the
+  -- side AWAY from the stem (below a stem-up note, above a stem-down one),
+  -- which needs the group's real, as-drawn direction, not a per-note guess.
+  local pending_note_names = {}
+  local function draw_legato_arc(run, stem_down)
+    local min_y, max_y = run.pts[1].y, run.pts[1].y
+    for _, p in ipairs(run.pts) do
+      if p.y < min_y then min_y = p.y end
+      if p.y > max_y then max_y = p.y end
+    end
+    local arc_y = stem_down and (min_y - TIE_ARC_HEIGHT) or (max_y + TIE_ARC_HEIGHT)
+    local first, last = run.pts[1], run.pts[#run.pts]
+    reaper.ImGui_DrawList_AddBezierCubic(
+      draw_list, first.x, first.y, first.x, arc_y, last.x, arc_y, last.x, last.y, COLOR_NOTE, 1.5, 0)
+  end
   -- Stem direction a tied note's predecessor last used, by string - a
   -- tied note is one continuous sound, so its stem shouldn't flip
   -- direction mid-tie just because the surrounding chord happens to
@@ -861,7 +913,7 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
         -- also has.
         if event.is_grace then
           reaper.ImGui_DrawList_AddCircleFilled(draw_list, actual_x, y, note_radius, COLOR_NOTE, 0)
-        elseif event.duration_ticks >= HALF_NOTE_TICKS then
+        elseif event.notated_ticks >= HALF_NOTE_TICKS then
           reaper.ImGui_DrawList_AddCircle(draw_list, actual_x, y, note_radius, COLOR_NOTE, 0, HOLLOW_NOTEHEAD_THICKNESS)
         else
           reaper.ImGui_DrawList_AddCircleFilled(draw_list, actual_x, y, note_radius, COLOR_NOTE, 0)
@@ -884,22 +936,23 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
       -- space above, but this app already takes similar guaranteed-simple
       -- shortcuts elsewhere (plain-text accidentals, stand-in rest glyphs)
       -- rather than replicating every fine engraving rule, so this skips
-      -- that nudge too. event.duration_ticks (not the note's own true
-      -- endppq) is what's actually notated here, same value everything
-      -- else about this note's shape/flags already reads. Grace notes
+      -- that nudge too. event.notated_ticks (not the note's own true
+      -- endppq, and not its raw gap-capped duration_ticks - see layout_
+      -- engine.lua's M.compute header for the distinction, relevant for a
+      -- triplet note) is what's actually notated here, same value
+      -- everything else about this note's shape/flags already reads. Grace notes
       -- (whose duration_ticks is a meaningless tiny value - see layout_
       -- engine.lua's is_grace header) never get one; a grace note has no
       -- augmentable rhythmic value to begin with.
-      local is_dotted = not event.is_grace and notation_model.is_dotted_duration(event.duration_ticks)
+      local is_dotted = not event.is_grace and notation_model.is_dotted_duration(event.notated_ticks)
       if is_dotted then
         reaper.ImGui_DrawList_AddCircleFilled(draw_list, actual_x + note_radius + DOT_GAP, y, DOT_RADIUS, COLOR_NOTE, 0)
       end
 
       -- Rightmost edge of whatever's already drawn at this note's own x
-      -- (the notehead, plus its augmentation dot if any) - both the
-      -- optional note-name cheat sheet below and the let-ring dashing
-      -- further down anchor off this instead of a bare notehead-radius
-      -- offset, so neither one draws on top of the dot.
+      -- (the notehead, plus its augmentation dot if any) - the let-ring
+      -- dashing further down anchors off this instead of a bare notehead-
+      -- radius offset, so it doesn't draw on top of the dot.
       local right_edge_x = actual_x + note_radius
       if is_dotted then
         right_edge_x = right_edge_x + DOT_GAP + DOT_RADIUS * 2
@@ -907,15 +960,16 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
 
       -- "Show Note Names" cheat sheet (config.show_note_names, ui_chrome.
       -- lua's checkbox): the note's plain sharps-only name (notation_
-      -- model.pitch_to_name, e.g. "E1") just right of its notehead/dot.
-      -- Skipped for X-notehead notes (note.string == nil) - those aren't a
-      -- real playable pitch to name. Pushes right_edge_x past the name so
-      -- let-ring (below) doesn't draw through it.
+      -- model.pitch_to_name, e.g. "E1"), centered under/over the notehead -
+      -- below when the note ends up stem-up, above when stem-down (the side
+      -- away from the stem - see pending_note_names' own comment for why
+      -- this can't be drawn here yet). Skipped for X-notehead notes
+      -- (note.string == nil) - those aren't a real playable pitch to name.
       if config.show_note_names and note.string then
-        local name = notation_model.pitch_to_name(note.pitch)
-        local nw, nh = reaper.ImGui_CalcTextSize(ctx, name)
-        reaper.ImGui_DrawList_AddText(draw_list, right_edge_x + NOTE_NAME_GAP, y - nh / 2, COLOR_NOTE_NAME, name)
-        right_edge_x = right_edge_x + NOTE_NAME_GAP + nw
+        pending_note_names[#pending_note_names + 1] = {
+          x = actual_x, y = y, name = notation_model.pitch_to_name(note.pitch),
+          note_radius = note_radius, event_index = i, staff = staff,
+        }
       end
 
       -- Let ring: this note's actual MIDI sustain outlasts its own
@@ -979,7 +1033,39 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
         reaper.ImGui_DrawList_AddBezierCubic(
           draw_list, stub_x, arc_y, stub_x, arc_y, actual_x, arc_y, actual_x, y, COLOR_NOTE, 1.5, 0)
       end
+
+      -- Legato slur (hammer-on/pull-off - see layout_engine.compute's own
+      -- legato_from_prev comment and open_legato_run's comment above):
+      -- accumulates into a run rather than drawing immediately, so 3+
+      -- consecutively-tagged notes get ONE arc spanning the whole run
+      -- instead of a separate small arc between each pair. event_index/
+      -- staff are recorded (and re-recorded on every extension) so the
+      -- eventual draw pass can look up the DESTINATION note's real,
+      -- Pass-2-decided stem direction - unlike a tie, a slur's endpoints
+      -- can have different pitches (different natural stem sides), so
+      -- anchoring to the note actually being arrived at reads more
+      -- naturally than the run's starting note. Runs independently of the
+      -- tie branch above (not an elseif) - a note is never both tied AND
+      -- legato-tagged in practice (a hammer-on/pull-off changes pitch), so
+      -- this never double-draws in the cases this app actually produces.
       if note.string then
+        if note.legato_from_prev and last_notehead_by_string[note.string] then
+          local run = open_legato_run[note.string]
+          if not run then
+            run = { pts = { last_notehead_by_string[note.string] } }
+            open_legato_run[note.string] = run
+          end
+          table.insert(run.pts, { x = actual_x, y = y })
+          run.event_index = i
+          run.staff = staff
+        elseif open_legato_run[note.string] then
+          -- Known gap, same scope boundary as this file's other cross-
+          -- system simplifications (rests, let-ring): a legato run that
+          -- happens to cross a system/line-wrap boundary just stops here -
+          -- no hanging-slur half like ties get, not yet built.
+          table.insert(pending_legato_arcs, open_legato_run[note.string])
+          open_legato_run[note.string] = nil
+        end
         last_notehead_by_string[note.string] = { x = actual_x, y = y }
         last_staff_by_string[note.string] = staff
       end
@@ -1024,6 +1110,13 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
     event_note_staff[i] = note_staff
   end
 
+  -- Flush any legato run still open at this system's last note - same
+  -- known cross-system gap as the branch above; this just queues what
+  -- accumulated within this system rather than dropping it silently.
+  for _, run in pairs(open_legato_run) do
+    table.insert(pending_legato_arcs, run)
+  end
+
   -- Rests: gaps in the timeline, positioned via layout_engine.x_for_tick
   -- since (unlike notes) they don't have their own render_model entries -
   -- see notation_model.detect_rests for the (simplified) classification
@@ -1040,7 +1133,7 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
   -- Falls back to treble for any rest before the first note (nothing yet
   -- to inherit from), same as the old fixed behavior.
   local leading_tick = measure_ticks and measure_ticks[1]
-  local rests = notation_model.detect_rests(render_model, leading_tick, measure_ticks)
+  local rests = notation_model.detect_rests(render_model, leading_tick, measure_ticks, beat_ticks_lookup)
   local rest_event_ptr = 0
   local function staff_for_rest(rest_tick)
     if not is_grand then return "treble" end
@@ -1229,7 +1322,7 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
           local dash_count = {}
           local max_bars = 0
           for _, ei in ipairs(staff_members) do
-            local dc = notation_model.duration_dash_count(render_model[ei].duration_ticks)
+            local dc = notation_model.duration_dash_count(render_model[ei].notated_ticks)
             dash_count[ei] = dc
             if dc > max_bars then max_bars = dc end
           end
@@ -1291,12 +1384,235 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
     end
   end
 
+  -- Legato slur arcs (see open_legato_run/pending_legato_arcs' own
+  -- comments above): drawn here, after Pass 2 above has resolved every
+  -- event/staff's real stem direction, not back in Pass 1 - each run's
+  -- side (above/below the noteheads) has to match the DESTINATION note's
+  -- actual, as-drawn stem, which a beam group's collective pitch extremes
+  -- can decide differently than that one note's own position would
+  -- suggest in isolation.
+  for _, run in ipairs(pending_legato_arcs) do
+    local staff_data = run.staff and event_staff[run.event_index] and event_staff[run.event_index][run.staff]
+    local direction = staff_data and staff_data.direction
+    local stem_down
+    if direction then
+      stem_down = direction == "down"
+    else
+      -- Defensive fallback only - every note with a string should have
+      -- resolved a direction in Pass 2 above; falls back to the same
+      -- single-note-vs-middle-line guess this used before the deferred
+      -- draw existed, rather than silently picking a fixed side.
+      local last = run.pts[#run.pts]
+      stem_down = last.y <= y_at(middle_line_offset(run.staff or "treble"))
+    end
+    draw_legato_arc(run, stem_down)
+  end
+
+  -- "Show Note Names" cheat sheet (see pending_note_names' own comment
+  -- above) - drawn here, after Pass 2 has resolved every event/staff's real
+  -- stem direction, same deferred-drawing reason as the legato arcs just
+  -- above. Below the notehead for a stem-up note, above it for a stem-down
+  -- one - the side away from the stem, matching where the legato arc itself
+  -- lands relative to the stem (see draw_legato_arc's own arc_y).
+  for _, pn in ipairs(pending_note_names) do
+    local staff_data = pn.staff and event_staff[pn.event_index] and event_staff[pn.event_index][pn.staff]
+    local direction = staff_data and staff_data.direction
+    local stem_down
+    if direction then
+      stem_down = direction == "down"
+    else
+      -- Defensive fallback only - every note with a string should have
+      -- resolved a direction in Pass 2 above.
+      stem_down = pn.y <= y_at(middle_line_offset(pn.staff or "treble"))
+    end
+    local nw, nh = reaper.ImGui_CalcTextSize(ctx, pn.name)
+    local name_y = stem_down
+      and (pn.y - pn.note_radius - NOTE_NAME_GAP - nh)
+      or (pn.y + pn.note_radius + NOTE_NAME_GAP)
+    reaper.ImGui_DrawList_AddText(draw_list, pn.x - nw / 2, name_y, COLOR_NOTE_NAME, pn.name)
+  end
+
+  -- Pass 2.5: tuplet brackets/numerals for detected tuplets
+  -- (notation_model.detect_tuplets, threaded through as event.tuplet by
+  -- layout_engine.compute). Each detected group (t.id) is drawn entirely
+  -- on its own - notation_model.detect_tuplets no longer merges consecutive
+  -- same-shape groups into one shared bracket (see its own comment for
+  -- why), so there's no separate "display key" indirection needed here
+  -- anymore, just one group per id. Only draws a group once it's complete
+  -- (every index 1..count present, in event_index[idx] order, which is
+  -- already left-to-right since Pass 1 assigns index sequentially in tick
+  -- order) - a barline split or other edge case leaving a render-model
+  -- entry missing is skipped rather than drawing a misleading partial
+  -- bracket; this has to hold for N != 3, which is why this doesn't
+  -- hardcode members[1]/[2]/[3].
+  local groups = {} -- id -> { count=n, [index]=event_index }
+  for i = 1, #render_model do
+    local t = render_model[i].tuplet
+    if t then
+      local g = groups[t.id]
+      if not g then g = { count = t.count }; groups[t.id] = g end
+      g[t.index] = i
+    end
+  end
+
+  local function group_complete(g)
+    for idx = 1, g.count do
+      if not g[idx] then return false end
+    end
+    return true
+  end
+
+  local function group_members(g)
+    local out = {}
+    for idx = 1, g.count do out[#out + 1] = g[idx] end
+    return out
+  end
+
+  local base_font_size = reaper.ImGui_GetFontSize(ctx)
+  local tuplet_font_size = base_font_size * TUPLET_FONT_SCALE
+  local text_scale = tuplet_font_size / base_font_size
+
+  -- edge_y is the point exactly TUPLET_NUMERAL_GAP away from whatever the
+  -- numeral is clearing (a beam or a bracket line), NOT the text's own
+  -- center - the text is anchored so its NEAR edge sits at edge_y and it
+  -- grows further away in the sign direction (sign>0 = numeral belongs
+  -- below/growing downward, sign<0 = above/growing upward). Centering the
+  -- text ON edge_y instead (an earlier version of this did) put roughly
+  -- half the glyph's own height back past edge_y, overlapping the beam/
+  -- line it was supposed to clear whenever TUPLET_NUMERAL_GAP was smaller
+  -- than half the text's height - which it always was.
+  local function draw_tuplet_numeral(cx, edge_y, sign, ratio_num)
+    local text = tostring(ratio_num)
+    local w, h = reaper.ImGui_CalcTextSize(ctx, text)
+    local text_w, text_h = w * text_scale, h * text_scale
+    local text_top = (sign > 0) and edge_y or (edge_y - text_h)
+    reaper.ImGui_DrawList_AddTextEx(draw_list, nil, tuplet_font_size,
+      cx - text_w / 2, text_top, COLOR_NOTE, text)
+  end
+
+  for _, g in pairs(groups) do
+    if group_complete(g) then
+      local all_members = group_members(g)
+      local ei1, ei_last = all_members[1], all_members[#all_members]
+      local x_start = origin_x + render_model[ei1].x
+      local x_end = origin_x + render_model[ei_last].x
+      local mid_x = (x_start + x_end) / 2
+      local ratio_num = render_model[ei1].tuplet.ratio_num
+
+      -- Common case (a single-beat shape - eighth-triplet, sextuplet, or
+      -- septuplet - sharing one beam group): a bare numeral hugging the
+      -- beam, no bracket lines needed, standard engraving practice.
+      -- Checked across ALL members, not just first/last, since a mid-run
+      -- member could in principle land in a different beam group even
+      -- when the first and last do match. group_beams never spans more
+      -- than one beat, so this is naturally false for any 2-beat shape
+      -- (quarter-triplet, nonuplet, 11/13-tuplet) - those always fall
+      -- through to the bracket-with-hooks case below, even though each
+      -- beat's own notes are still beamed normally per-beat. That's the
+      -- intended outcome, not a gap.
+      local gi = event_to_group[ei1]
+      local shared_group = gi ~= nil
+      if shared_group then
+        for _, ei in ipairs(all_members) do
+          if event_to_group[ei] ~= gi then shared_group = false break end
+        end
+      end
+      local drawn = false
+
+      if shared_group then
+        for _, geo in pairs(group_geo[gi] or {}) do
+          local sign = geo.direction == "down" and 1 or -1
+          draw_tuplet_numeral(mid_x, geo.beam_y + sign * TUPLET_NUMERAL_GAP, sign, ratio_num)
+          drawn = true
+        end
+      end
+
+      if not drawn then
+        -- Unbeamed / spans-multiple-beam-groups case (a 2-beat shape):
+        -- direction picked the same farthest-from-middle-line rule Pass 2
+        -- already resolved per event. Known minor gap (see this feature's
+        -- plan): members aren't specially forced onto one grand-staff
+        -- staff the way a beam group already is, so this draws against
+        -- whichever staff the first member landed on.
+        for staff, data in pairs(event_staff[ei1]) do
+          local min_y, max_y = data.min_y, data.max_y
+          for _, ei in ipairs(all_members) do
+            local d2 = event_staff[ei][staff]
+            if d2 then
+              if d2.min_y < min_y then min_y = d2.min_y end
+              if d2.max_y > max_y then max_y = d2.max_y end
+            end
+          end
+          local direction = data.direction or "down"
+          local sign = direction == "down" and 1 or -1
+
+          -- Reach beyond the noteheads uses the SAME dynamic per-note
+          -- stem_length_for rule beams themselves use (see its own
+          -- comment above), computed from this bracket's own overall
+          -- extreme notehead (min_y/max_y across every member, not just
+          -- one beat) - always >= any single beat's own reach, since no
+          -- individual beat's extreme note can be farther from the middle
+          -- line than the whole group's. A flat stem_length here (an
+          -- earlier version) under-reached whenever any member needed the
+          -- dynamic ledger-line extension, landing the bracket INSIDE
+          -- that beat's own already-longer beam.
+          local reach = stem_length_for(direction == "down" and max_y or min_y, direction, staff)
+          local line_y = (direction == "down") and (max_y + reach) or (min_y - reach)
+
+          -- Also clear whichever ACTUAL per-beat beams (group_geo, from
+          -- the earlier beam-drawing pass) fall under this bracket's
+          -- span - a beat with a stacked multi-bar beam (16th-or-shorter-
+          -- equivalent notes, e.g. a nonuplet/11-/13-tuplet beat) can
+          -- reach further out than a plain notehead-based stem estimate
+          -- accounts for, since group_beams never spans more than one
+          -- beat and so draws its own beam independently of this bracket.
+          for _, ei in ipairs(all_members) do
+            local gi = event_to_group[ei]
+            local geo = gi and group_geo[gi] and group_geo[gi][staff]
+            if geo then
+              local max_level = 1
+              for _, bar in ipairs(geo.bars) do
+                if bar.level > max_level then max_level = bar.level end
+              end
+              local bar_edge = geo.beam_y + (max_level - 1) * BEAM_BAR_GAP * sign
+              if direction == "down" then
+                if bar_edge > line_y then line_y = bar_edge end
+              else
+                if bar_edge < line_y then line_y = bar_edge end
+              end
+            end
+          end
+
+          line_y = line_y + sign * TUPLET_BRACKET_CLEARANCE
+
+          reaper.ImGui_DrawList_AddLine(draw_list, x_start, line_y, x_end, line_y, COLOR_NOTE, 1.0)
+          -- -sign, not +sign: the horizontal line itself sits on the
+          -- away-from-the-notes side (same side a beam would use - see
+          -- line_y above), but each end's short hook bends back the OTHER
+          -- way, toward the noteheads, the same convex "cups the notes"
+          -- shape a real engraved tuplet bracket uses (⌐‾‾‾¬ above
+          -- stems-up notes, ⌊__⌋ below stems-down ones) - not a symmetric
+          -- ⌐‾‾‾⌐ that bows away from the notes at both ends. An earlier
+          -- version used +sign here, drawing the hooks pointing further
+          -- away instead - the "concave instead of convex" bug.
+          reaper.ImGui_DrawList_AddLine(draw_list, x_start, line_y, x_start, line_y - sign * TUPLET_BRACKET_HOOK_LEN, COLOR_NOTE, 1.0)
+          reaper.ImGui_DrawList_AddLine(draw_list, x_end, line_y, x_end, line_y - sign * TUPLET_BRACKET_HOOK_LEN, COLOR_NOTE, 1.0)
+          -- +sign here (unaffected by the hook fix above): the numeral
+          -- still belongs on the OUTSIDE of the bracket LINE, further away
+          -- from the notes than line_y itself, not tucked between the
+          -- inward-curling hooks.
+          draw_tuplet_numeral(mid_x, line_y + sign * TUPLET_NUMERAL_GAP, sign, ratio_num)
+        end
+      end
+    end
+  end
+
   -- Pass 3: stems - to a shared beam if grouped, otherwise a normal
   -- full-length stem plus a flag if the note's short enough to need one.
   -- Whole notes (or longer) get no stem at all, matching real notation.
   for i = 1, #render_model do
     local event = render_model[i]
-    if event.duration_ticks < WHOLE_NOTE_TICKS then
+    if event.notated_ticks < WHOLE_NOTE_TICKS then
       local x = origin_x + event.x
       local group_index = event_to_group[i]
 
@@ -1328,8 +1644,8 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
             if event.is_grace then
               draw_flags(draw_list, x - radius, tip_y, 1, "down")
               draw_grace_slash(draw_list, x - radius, tip_y, "down")
-            elseif event.duration_ticks < config.layout.ppq_per_quarter then
-              draw_flags(draw_list, x - radius, tip_y, notation_model.duration_dash_count(event.duration_ticks), "down")
+            elseif event.notated_ticks < config.layout.ppq_per_quarter then
+              draw_flags(draw_list, x - radius, tip_y, notation_model.duration_dash_count(event.notated_ticks), "down")
             end
           else
             local tip_y = data.min_y - stem_length_for(data.min_y, "up", staff)
@@ -1337,8 +1653,8 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
             if event.is_grace then
               draw_flags(draw_list, x + radius, tip_y, 1, "up")
               draw_grace_slash(draw_list, x + radius, tip_y, "up")
-            elseif event.duration_ticks < config.layout.ppq_per_quarter then
-              draw_flags(draw_list, x + radius, tip_y, notation_model.duration_dash_count(event.duration_ticks), "up")
+            elseif event.notated_ticks < config.layout.ppq_per_quarter then
+              draw_flags(draw_list, x + radius, tip_y, notation_model.duration_dash_count(event.notated_ticks), "up")
             end
           end
         end

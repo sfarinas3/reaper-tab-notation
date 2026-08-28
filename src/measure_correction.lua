@@ -12,7 +12,8 @@
 -- fine, selecting the measure a note you just corrected belongs to is the
 -- expected use) sets selected_measure_idx. No popup needed (contrast
 -- note_editor.lua) - results are drawn inline in M.draw_panel, called once
--- from main.lua alongside ui_chrome.draw.
+-- from main.lua alongside ui_chrome.lua's draw_score_settings/draw_print_
+-- export/draw_mode_toggles.
 --
 -- Similarity (see similarity(), below) requires two measures to have the
 -- SAME NUMBER OF EVENTS and the SAME NUMBER OF NOTES PER EVENT to be
@@ -223,9 +224,11 @@ end
 -- Panel
 -- ---------------------------------------------------------------------
 
--- Draws the "Measure Correction Tool" section - call once per frame, e.g.
--- alongside ui_chrome.draw, AFTER main.lua's own recompute block so
--- assigned_events/measure_ticks/measure_info reflect this frame's take.
+-- Draws the "Measure Correction Tool" section - call once per frame, AFTER
+-- main.lua's own recompute block so assigned_events/measure_ticks/
+-- measure_info reflect this frame's take (positioned between ui_chrome.
+-- lua's draw_score_settings and draw_print_export in the menu - see
+-- main.lua's own comment on that ordering).
 -- Self-contained: does its own MIDI_SetNote writes (via apply_corrections)
 -- rather than returning a "please recompute" signal, since those writes
 -- change real MIDI note data, which main.lua's existing note-hash check
@@ -239,11 +242,13 @@ function M.draw_panel(ctx, take, assigned_events, measure_ticks, measure_info)
   if not reaper.ImGui_CollapsingHeader(ctx, "Measure Correction Tool", nil) then
     return
   end
+  reaper.ImGui_Indent(ctx)
 
   if not selected_measure_idx then
     reaper.ImGui_TextWrapped(
       ctx, "After manually correcting a measure, you can apply those changes to similar measures. " ..
       "Click a measure on the staff you want to use as a template to correct other similar measures.")
+    reaper.ImGui_Unindent(ctx)
     return
   end
 
@@ -252,6 +257,7 @@ function M.draw_panel(ctx, take, assigned_events, measure_ticks, measure_info)
     -- Stale selection - e.g. the take got shorter since this was set.
     selected_measure_idx = nil
     search_results = nil
+    reaper.ImGui_Unindent(ctx)
     return
   end
 
@@ -265,6 +271,7 @@ function M.draw_panel(ctx, take, assigned_events, measure_ticks, measure_info)
   if #corrections == 0 then
     reaper.ImGui_TextWrapped(
       ctx, "Pin at least one note's string in this measure (click its fret number) before searching.")
+    reaper.ImGui_Unindent(ctx)
     return
   end
 
@@ -301,6 +308,8 @@ function M.draw_panel(ctx, take, assigned_events, measure_ticks, measure_info)
   if apply_status then
     reaper.ImGui_TextWrapped(ctx, apply_status)
   end
+
+  reaper.ImGui_Unindent(ctx)
 end
 
 return M

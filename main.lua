@@ -55,18 +55,22 @@
 -- popup to correct its pitch or pin/unpin its string - the bounded write
 -- path back into the take for when the fret-assignment heuristic picks a
 -- musically-wrong string, since MIDI has no native string field and
--- REAPER's own piano roll has no way to set one. Duration changes,
--- insert/delete, and dragging remain REAPER-piano-roll-only.
+-- REAPER's own piano roll has no way to set one. This is View Mode's
+-- whole scope - it never creates/deletes/resizes a note; see Edit Mode,
+-- below, for where that now lives instead.
 --
 -- Edit Mode (ui_chrome.lua's toggle at the top of the panel; tab_editor.
 -- lua): a second, mutually-exclusive click surface alongside note_editor.
 -- lua's View Mode above - clicking an empty tab-staff grid position opens
--- a popup to type a fret number, creating a real MIDI note (chan pinned to
--- the clicked string) at a fixed grid duration; clicking an existing note
--- opens a popup to delete it. Real note creation/deletion, unlike Phase
--- 6's reassignment-only scope - see tab_editor.lua's header for the click-
--- locating/collision-handling design. Duration is fixed for now;
--- drag-to-resize is a later, separate phase.
+-- a popup to type a fret number AND a duration (entered as a denominator,
+-- e.g. "8" for an eighth note), creating a real MIDI note (chan pinned to
+-- the clicked string); clicking an existing note opens a popup to change
+-- its duration the same way or delete it. Real note creation/deletion/
+-- duration-editing, unlike Phase 6's reassignment-only scope - see
+-- tab_editor.lua's header for the click-locating/collision-handling/
+-- duration-conversion design (a typed field, not a drag gesture - an
+-- earlier drag-based design was tried and reverted, see that file's
+-- header for why).
 --
 -- Score header (title/composer/arranger, ui_chrome.lua's "Score Info"
 -- section): drawn once above the very first system, like a real printed
@@ -230,13 +234,23 @@ local function main()
     return note_editor.revert_all(take)
   end
 
-  -- ui_chrome.draw's return is a second, explicit cache-invalidation
-  -- signal alongside the note-hash check below - tuning/capo edits never
-  -- touch the MIDI take, so the hash alone would never notice them.
-  -- edit_mode (second return) picks which module's check_system runs on a
-  -- staff click below - View Mode's note_editor (unchanged) or Edit
-  -- Mode's tab_editor (create/delete notes) - see tab_editor.lua's header.
-  local settings_changed, edit_mode = ui_chrome.draw(ctx, config, take, do_export, on_revert_all)
+  -- Score Settings is drawn first (and up here, before the recompute
+  -- block below) since it's the one settings piece whose OWN return value
+  -- feeds that block's cache-invalidation check - tuning/capo/key edits
+  -- never touch the MIDI take, so the hash alone would never notice them.
+  -- Measure Correction Tool / Print & Export / the Edit Mode+Show Note
+  -- Names toggles are drawn later (see below, after the recompute block
+  -- and the take/measure validity checks) - ui_chrome.lua's old monolithic
+  -- M.draw drew everything in one call, but the requested menu order
+  -- (Score Settings, then Measure Correction Tool, then Print/Export, then
+  -- the two toggles last) needs Measure Correction Tool sitting between
+  -- two pieces of what used to be one function, so it's now three
+  -- separate ones instead. edit_mode - which module's check_system runs
+  -- on a staff click further down (View Mode's note_editor, unchanged, or
+  -- Edit Mode's tab_editor, create/delete notes - see tab_editor.lua's
+  -- header) - only becomes known once draw_mode_toggles runs below, well
+  -- before the systems loop that actually needs it.
+  local settings_changed = ui_chrome.draw_score_settings(ctx, config, take, on_revert_all)
 
   if hash ~= last_hash or settings_changed or take_settings_changed or pending_recompute then
     last_hash = hash
@@ -253,6 +267,11 @@ local function main()
       -- assigned_events already has, identically to what the eventual
       -- render model would carry.
       cached_measure_ticks, cached_measure_info = notation_model.measure_boundaries(take, assigned_events)
+      -- Detected up front, same as measure_boundaries above, since
+      -- layout_engine.compute needs each tuplet's nominal (notated)
+      -- duration available at emit time, not after the fact.
+      local tuplet_lookup = notation_model.detect_tuplets(assigned_events,
+        notation_model.beat_ticks_lookup(cached_measure_ticks, cached_measure_info))
       -- Layout only needs recomputing when the notes actually change (or,
       -- later, on panel resize/zoom) - cached here alongside the heuristic
       -- result rather than recomputed every frame.
@@ -260,6 +279,7 @@ local function main()
         measure_width = draw_tab.make_measurer(ctx),
         beat_ticks_lookup = notation_model.beat_ticks_lookup(cached_measure_ticks, cached_measure_info),
         measure_ticks = cached_measure_ticks,
+        tuplet_lookup = tuplet_lookup,
       })
     else
       cached_render_model = nil
@@ -271,6 +291,14 @@ local function main()
 
   if not take then
     reaper.ImGui_TextWrapped(ctx, "Select a MIDI item on a track in REAPER to see its notes here.")
+    -- Measure Correction Tool/Print & Export/the mode toggles still draw
+    -- on this early return, same reasoning as Score Settings above -
+    -- they're general settings, not dependent on a take being selected
+    -- (Measure Correction Tool self-guards to draw nothing without a
+    -- valid take/measure_ticks, but the other two have nothing to guard).
+    measure_correction.draw_panel(ctx, take, cached_assigned_events, cached_measure_ticks, cached_measure_info)
+    ui_chrome.draw_print_export(ctx, config, do_export)
+    ui_chrome.draw_mode_toggles(ctx, config, take)
     -- Still gives both modules' popups their BeginPopup/EndPopup pair even
     -- on this early return - if a popup was left open when the take
     -- disappeared (e.g. the user deselected the item mid-edit, or
@@ -280,8 +308,13 @@ local function main()
     -- loop's per-click hit-test (below) actually branches on it.
     note_editor.begin_frame(ctx)
     tab_editor.begin_frame(ctx, take, cached_assigned_events)
-    pending_recompute = note_editor.end_frame(ctx, take)
-    tab_editor.end_frame(ctx)
+    -- Both called unconditionally (never short-circuited via `or`) - each
+    -- module's own end_frame draws its popup every frame regardless of
+    -- the other's return value, so `a or b` would skip tab_editor's call
+    -- entirely whenever note_editor's already returned true.
+    local note_editor_changed = note_editor.end_frame(ctx, take)
+    local tab_editor_changed = tab_editor.end_frame(ctx)
+    pending_recompute = note_editor_changed or tab_editor_changed
     return
   end
 
@@ -297,10 +330,20 @@ local function main()
   -- the item rather than "it just has no notes yet."
   if not cached_measure_ticks or #cached_measure_ticks < 2 then
     reaper.ImGui_TextWrapped(ctx, "Unable to read this item's measures.")
+    -- Same reasoning as the "not take" branch above - these still draw
+    -- even though there's nothing renderable this frame.
+    measure_correction.draw_panel(ctx, take, cached_assigned_events, cached_measure_ticks, cached_measure_info)
+    ui_chrome.draw_print_export(ctx, config, do_export)
+    ui_chrome.draw_mode_toggles(ctx, config, take)
     note_editor.begin_frame(ctx)
     tab_editor.begin_frame(ctx, take, cached_assigned_events)
-    pending_recompute = note_editor.end_frame(ctx, take)
-    tab_editor.end_frame(ctx)
+    -- Both called unconditionally (never short-circuited via `or`) - each
+    -- module's own end_frame draws its popup every frame regardless of
+    -- the other's return value, so `a or b` would skip tab_editor's call
+    -- entirely whenever note_editor's already returned true.
+    local note_editor_changed = note_editor.end_frame(ctx, take)
+    local tab_editor_changed = tab_editor.end_frame(ctx)
+    pending_recompute = note_editor_changed or tab_editor_changed
     return
   end
 
@@ -311,19 +354,29 @@ local function main()
   -- (measure_correction.check_system) - so a fresh selection shows up here
   -- one frame later, imperceptible at normal frame rates (the same kind of
   -- one-frame lag note_editor.lua's own technique-tag signal already
-  -- accepts - see that file's header).
+  -- accepts - see that file's header). Positioned second in the menu (see
+  -- ui_chrome.lua's own comment on why Score Settings/Print & Export/the
+  -- mode toggles are now three separate functions instead of one).
   measure_correction.draw_panel(ctx, take, cached_assigned_events, cached_measure_ticks, cached_measure_info)
+
+  -- Print & Export, third in the menu; the Edit Mode/Show Note Names
+  -- toggles, last - edit_mode (needed by the systems loop below, for
+  -- which module's check_system runs on a staff click) is only known once
+  -- this returns, well before that loop actually runs.
+  ui_chrome.draw_print_export(ctx, config, do_export)
+  local edit_mode = ui_chrome.draw_mode_toggles(ctx, config, take)
 
   -- No separate ImGui_Text block needed here for the guitar/tuning/key
   -- summary: score_render.draw_header (below) already draws it on the
   -- canvas, and that call runs in this SAME live-view frame too, not just
   -- pdf_export.lua's print pass - see that file's header. It lands right
-  -- here, immediately below Measure Correction, since that's exactly where
-  -- origin_y (the score canvas's own top-left) falls once every widget
-  -- above it - including Measure Correction's own panel - has been drawn.
+  -- here, below the whole settings menu (Score Settings, Measure
+  -- Correction Tool, Print & Export, the mode toggles), since that's
+  -- exactly where origin_y (the score canvas's own top-left) falls once
+  -- every widget above it has been drawn.
   local draw_list = reaper.ImGui_GetWindowDrawList(ctx)
   local origin_x, origin_y = reaper.ImGui_GetCursorScreenPos(ctx)
-  local _, avail_h = reaper.ImGui_GetContentRegionAvail(ctx)
+  local avail_w, avail_h = reaper.ImGui_GetContentRegionAvail(ctx)
 
   -- Recomputed every frame (cheap) rather than cached, since the Colors
   -- section can change config.color_fg/color_bg at any time - dim is the
@@ -414,8 +467,12 @@ local function main()
     end
   end
 
-  pending_recompute = note_editor.end_frame(ctx, take)
-  tab_editor.end_frame(ctx)
+  -- Both called unconditionally - see the early-return branches above for
+  -- why this can't be a short-circuited `note_editor.end_frame(...) or
+  -- tab_editor.end_frame(...)`.
+  local note_editor_changed = note_editor.end_frame(ctx, take)
+  local tab_editor_changed = tab_editor.end_frame(ctx)
+  pending_recompute = note_editor_changed or tab_editor_changed
 
   local total_height = geo.top_reserve + (#systems * geo.system_pitch - config.layout.system_gap) + BOTTOM_MARGIN
 
@@ -450,15 +507,40 @@ local function main()
 
   -- Reserve the space we just drew into via the draw list so the window's
   -- own layout/scrolling accounts for it (the draw list itself doesn't
-  -- advance ImGui's cursor).
-  reaper.ImGui_Dummy(ctx, total_width, total_height)
+  -- advance ImGui's cursor). InvisibleButton, not Dummy - a real, once-
+  -- live bug: Dummy reserves layout space but claims no mouse interaction,
+  -- so a click-drag anywhere over the score (e.g. Edit Mode's drag-to-
+  -- select rectangle - see tab_editor.lua's header) fell through to
+  -- REAPER's own docker/window chrome with nothing in ImGui claiming it,
+  -- which read the drag as "move this pane" instead. An InvisibleButton
+  -- covering the exact same rect makes Dear ImGui treat this area as a
+  -- real interactive item, which stops that fallthrough - this app's own
+  -- click/drag handling (tab_editor.lua/note_editor.lua/measure_
+  -- correction.lua) still reads raw global mouse state directly rather
+  -- than this button's own pressed/hovered result, so nothing about their
+  -- own logic needed to change, only what claims the region.
+  --
+  -- Sized to at least avail_w/avail_h (the window's own remaining content
+  -- region, captured before any of the above was drawn), not just total_
+  -- width/total_height (the score's own tight content bounding box) - a
+  -- second real bug this surfaced: whenever the window is wider or taller
+  -- than the score actually needs (a short piece, or a window the user
+  -- resized larger), the leftover blank margin past total_width/height was
+  -- claimed by nothing at all, so a drag-select started there still fell
+  -- through to REAPER's docker exactly like before this button existed.
+  -- Taking the max of each pair keeps the OTHER direction's existing
+  -- behavior unchanged - when the score is actually the larger of the two
+  -- (the normal case, needing to scroll), this is identical to before.
+  local canvas_w = math.max(total_width, avail_w)
+  local canvas_h = math.max(total_height, avail_h)
+  reaper.ImGui_InvisibleButton(ctx, "score_canvas", canvas_w, canvas_h)
 end
 
 local WINDOW_FLAGS = reaper.ImGui_WindowFlags_NoCollapse() | reaper.ImGui_WindowFlags_HorizontalScrollbar()
 
 local function loop()
   reaper.ImGui_SetNextWindowSize(ctx, 700, 420, reaper.ImGui_Cond_FirstUseEver())
-  -- config.color_bg (ui_chrome.lua's "Colors" section) overrides the
+  -- config.color_bg (ui_chrome.lua's "Score Color Scheme" section) overrides the
   -- window background for just this window - pushed/popped every frame
   -- since it can change at runtime, unlike a one-time style setup.
   reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_WindowBg(), config.color_bg)

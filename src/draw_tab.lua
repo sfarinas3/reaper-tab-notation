@@ -92,12 +92,14 @@
 --
 -- "Show Note Names" cheat sheet (config.show_note_names, ui_chrome.lua's
 -- checkbox): prints each real note's plain sharps-only name (notation_
--- model.pitch_to_name, e.g. "E1") immediately to the right of its own
--- label - after any parenthesized tie-number, and pushing label_end_x
--- (already used to anchor let-ring dashing) past it so the two never
--- overlap. Applies to every instrument, not just guitar - unlike the
+-- model.pitch_to_name, e.g. "E1") centered directly below its own fret
+-- number. Applies to every instrument, not just guitar - unlike the
 -- velocity-based techniques above, this is direct MIDI data (the note's
--- own pitch), not a heuristic guess.
+-- own pitch), not a heuristic guess. Any other below-the-number marking
+-- (Shamisen's duration dashes/technique glyph, guitar's P.M. label/dashes)
+-- stacks starting from below_y, AFTER the name, rather than at a fixed
+-- offset from the number itself - see the per-note loop below - so the two
+-- never overlap when a note carries both.
 
 local config = require('config')
 local notation_model = require('notation_model')
@@ -159,6 +161,18 @@ local PALM_MUTE_VELOCITY_MAX = 63 -- MIDI velocities 1-63 auto-detect as palm-mu
 local PINCH_HARMONIC_VELOCITY = 127 -- the MIDI maximum auto-detects as a pinch harmonic (guitar only)
 local PM_BELOW_GAP = 7 -- px between the fret number's own bottom edge and the "P.M." label/dashes below it
 local PH_ABOVE_GAP = 4 -- px between the "P.H." label and the fret number's own top edge above it
+-- Guitar technique ids for a tap tag - source of truth is tab_editor.lua's
+-- own GUITAR_TECHNIQUE_TAP/_LEGATO_TAP (the "t"/"lt" fret suffixes write
+-- these ids into midi_read.lua's technique P_EXT map); duplicated here
+-- rather than required, same TECHNIQUE_SYMBOLS-style cross-file convention
+-- this file already uses for the Shamisen ids. Unlike P.M./P.H. above, tap
+-- has no MIDI-velocity precedent to auto-detect from, so it's a manual
+-- tag, rendered ungated by instrument (same as legato's slur in draw_
+-- notation.lua) rather than only under is_guitar. GUITAR_TECHNIQUE_LEGATO_
+-- TAP ("lt") means legato AND tap together - a note can carry both at
+-- once, so the marker check below has to treat it as a tap tag too.
+local GUITAR_TECHNIQUE_TAP = 102
+local GUITAR_TECHNIQUE_LEGATO_TAP = 103
 local NOTE_NAME_GAP = 4 -- px between a label's own right edge and its "Show Note Names" cheat-sheet text
 
 -- "Let ring" marking: a dashed horizontal line from a note's own position
@@ -270,6 +284,12 @@ end
 
 -- Draws the tab staff for render_model (layout_engine.compute's output)
 -- into draw_list, anchored at (origin_x, origin_y) in screen coordinates.
+-- beat_ticks_lookup: optional - same function(tick) -> beat_ticks
+-- draw_notation.lua's own param is, passed straight through to
+-- notation_model.detect_rests so the tab staff's rest dots decompose a
+-- gap the exact same beat-aware way the notation staff's rest glyphs do -
+-- they'd otherwise disagree (e.g. one showing "half + eighth" split at a
+-- beat boundary, the other splitting the same gap at an arbitrary point).
 -- measure_ticks: optional - only used (for shamisen's rest dots) to seed
 -- notation_model.detect_rests' leading-silence check, exactly like
 -- draw_notation.lua's own measure_ticks param; omit it and rests just
@@ -279,7 +299,7 @@ end
 -- render_model has no notes at all (a fully empty system).
 -- Returns (width, height) consumed, so the caller can reserve that much
 -- space in the window's layout (e.g. via ImGui_Dummy).
-function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks, barline_x)
+function M.draw(ctx, draw_list, origin_x, origin_y, render_model, beat_ticks_lookup, measure_ticks, barline_x)
   local n_strings = #config.tuning
   local line_height = config.layout.line_height
   local staff_height = (n_strings - 1) * line_height
@@ -308,6 +328,40 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks,
   local is_shamisen = config.instrument == "Shamisen"
   local is_guitar = config.instrument == "Guitar"
   local last_x_by_string = {}
+  local last_w_by_string = {} -- each string's own most recently drawn label width - needed to offset a legato run's START point clear of that number (see open_legato_run below); the tie arc doesn't need this since it only ever offsets its END point.
+
+  -- Legato runs (hammer-on/pull-off - see layout_engine.compute's own
+  -- legato_from_prev comment): mirrors draw_notation.lua's own
+  -- open_legato_run - a slur spanning 3+ notes needs ONE arc over the
+  -- whole run, not a separate small arc between each consecutive pair, so
+  -- this accumulates the run's start/current-end x instead of drawing on
+  -- every continuation. y is fixed for the whole run (legato_from_prev is
+  -- only ever true between two notes on the SAME string - see layout_
+  -- engine.compute's prev_by_string lookup), unlike the notation staff's
+  -- version, so there's no per-note y tracking to do here, just the two x
+  -- endpoints.
+  --
+  -- Unlike the tie arc above (which starts flush against the previous
+  -- note's own x - accepted there since a tie is always just two numbers
+  -- close together), a legato run's arc rises well clear of every number
+  -- under it on BOTH ends, not just the trailing one - real, once-live
+  -- overlap: a run's START point used to sit exactly at the previous
+  -- note's own x, at the SAME y the numbers are drawn at, so the curve
+  -- visibly cut through the first digit before it had risen at all.
+  -- start_x is now offset clear of that number's own right edge, the same
+  -- way end_x already clears the last number's left edge - see the LET_
+  -- RING_GAP usage where the run is opened below. LEGATO_ARC_RISE is also
+  -- taller than the tie arc's own (0.4 * line_height) - a run spans
+  -- several intervening numbers, not just the two endpoints, so it needs
+  -- more headroom to comfortably clear all of them, not just the two it
+  -- anchors to.
+  local LEGATO_ARC_RISE = line_height * 0.7
+  local open_legato_run = {}
+  local function draw_legato_run(run)
+    local arc_y = run.y - LEGATO_ARC_RISE
+    reaper.ImGui_DrawList_AddBezierCubic(
+      draw_list, run.start_x, run.y, run.start_x, arc_y, run.end_x, arc_y, run.end_x, run.y, COLOR_TIE, 1.5, 0)
+  end
   -- Palm-mute run tracking: ONE state for the whole staff, not per string -
   -- palm muting is a right-hand technique applied to a passage/chord as a
   -- whole, not a per-string articulation, so a chord where several strings
@@ -361,14 +415,20 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks,
       local label_end_x = x + w / 2
 
       -- "Show Note Names" cheat sheet (config.show_note_names) - see this
-      -- file's header. Extends label_end_x past its own text so let-ring
-      -- dashing (further down) starts after the name instead of drawing
-      -- through it.
+      -- file's header. Centered directly below the fret number rather than
+      -- beside it, matching draw_notation.lua's own note-name placement
+      -- convention. below_y tracks the next free y below the number - every
+      -- other below-the-number marking (Shamisen's duration dashes/
+      -- technique glyph, guitar's P.M. label/dashes) starts from below_y
+      -- instead of a fixed y + h / 2, so the name and whichever technique
+      -- marking a note also happens to carry stack cleanly instead of
+      -- overlapping.
+      local below_y = y + h / 2
       if config.show_note_names and note.string then
         local name = notation_model.pitch_to_name(note.pitch)
         local nw, nh = reaper.ImGui_CalcTextSize(ctx, name)
-        reaper.ImGui_DrawList_AddText(draw_list, label_end_x + NOTE_NAME_GAP, y - nh / 2, COLOR_NOTE_NAME, name)
-        label_end_x = label_end_x + NOTE_NAME_GAP + nw
+        reaper.ImGui_DrawList_AddText(draw_list, x - nw / 2, below_y + NOTE_NAME_GAP, COLOR_NOTE_NAME, name)
+        below_y = below_y + NOTE_NAME_GAP + nh
       end
 
       if note.string and note.tied_from_prev and last_x_by_string[note.string] then
@@ -400,8 +460,8 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks,
       end
 
       if is_shamisen then
-        local number_bottom_y = y + h / 2
-        local dash_count = notation_model.duration_dash_count(event.duration_ticks)
+        local number_bottom_y = below_y
+        local dash_count = notation_model.duration_dash_count(event.notated_ticks)
         local dashes_bottom_y = number_bottom_y
         if dash_count > 0 then
           draw_duration_dashes(draw_list, x, number_bottom_y, dash_count)
@@ -436,7 +496,7 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks,
         end
 
         if note.string == pm_row_string then
-          local pm_y = y + h / 2 + PM_BELOW_GAP
+          local pm_y = below_y + PM_BELOW_GAP
           if pm_active then
             draw_let_ring_line(draw_list, pm_last_x, x, pm_y, COLOR_TECHNIQUE)
           else
@@ -447,6 +507,16 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks,
           pm_active = true
           pm_last_x = x
         end
+      end
+
+      -- Tap: manually tagged (see GUITAR_TECHNIQUE_TAP's own comment
+      -- above), drawn above the fret number the same way P.H. is - a
+      -- single-note marker, no run-tracking needed. Ungated by
+      -- is_guitar/is_shamisen, unlike the velocity-based markers above.
+      if (note.technique == GUITAR_TECHNIQUE_TAP or note.technique == GUITAR_TECHNIQUE_LEGATO_TAP) and note.string then
+        local text = "T"
+        local tw, th = reaper.ImGui_CalcTextSize(ctx, text)
+        reaper.ImGui_DrawList_AddText(draw_list, x - tw / 2, y - h / 2 - PH_ABOVE_GAP - th, COLOR_TECHNIQUE, text)
       end
 
       -- Let ring: this note's actual MIDI sustain outlasts its own
@@ -482,17 +552,48 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, measure_ticks,
         reaper.ImGui_DrawList_AddBezierCubic(draw_list, x, y, x, arc_y, edge_x, arc_y, edge_x, arc_y, COLOR_TIE, 1.5, 0)
       end
 
+      -- Legato slur (see open_legato_run's own comment above): extends the
+      -- run when this note continues it, closes/draws it the moment a note
+      -- on this string DOESN'T continue it. Independent of the tie branch
+      -- above (not an elseif) - a note is never both tied AND legato-
+      -- tagged in practice (a hammer-on/pull-off changes pitch), so this
+      -- never double-draws in the cases this app actually produces.
+      if note.string then
+        if note.legato_from_prev and last_x_by_string[note.string] then
+          local run = open_legato_run[note.string]
+          if not run then
+            local prev_w = last_w_by_string[note.string] or 0
+            run = { start_x = last_x_by_string[note.string] + prev_w / 2 + LET_RING_GAP, y = y }
+            open_legato_run[note.string] = run
+          end
+          run.end_x = x - w / 2 - LET_RING_GAP
+        elseif open_legato_run[note.string] then
+          -- Known gap, same as the tie arc above: a run crossing a
+          -- system/line-wrap boundary just stops here, no hanging-slur
+          -- half like ties get.
+          draw_legato_run(open_legato_run[note.string])
+          open_legato_run[note.string] = nil
+        end
+      end
+
       if note.string then
         last_x_by_string[note.string] = x
+        last_w_by_string[note.string] = w
       end
     end
+  end
+
+  -- Flush any legato run still open at this system's last note - see
+  -- open_legato_run's own comment above.
+  for _, run in pairs(open_legato_run) do
+    draw_legato_run(run)
   end
 
   if is_shamisen then
     local rest_string = math.ceil(n_strings / 2) -- the middle string - see this file's header
     local rest_y = origin_y + (rest_string - 1) * line_height
     local leading_tick = measure_ticks and measure_ticks[1]
-    local rests = notation_model.detect_rests(render_model, leading_tick, measure_ticks)
+    local rests = notation_model.detect_rests(render_model, leading_tick, measure_ticks, beat_ticks_lookup)
     for _, rest in ipairs(rests) do
       -- #render_model == 0 (a fully empty system) falls back to
       -- barline_x-based positioning - see M.draw's own doc comment and

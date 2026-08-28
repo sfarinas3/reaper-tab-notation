@@ -5,7 +5,7 @@
 -- preset - currently Guitar/Shamisen, see INSTRUMENTS), string count,
 -- tuning (per-string note names, or a preset), capo, and max fret in one
 -- collapsible "Instrument Settings" section, key signature in its own
--- separate "Key Signature" section, and a "Colors" section with just
+-- separate "Key Signature" section, and a "Score Color Scheme" section with just
 -- two options - background and one foreground "ink" color covering
 -- everything else (noteheads, stems, text, staff/tab lines) - rather than
 -- per-element colors, at least for now (see color_util.lua for how
@@ -482,6 +482,7 @@ local export_status = nil -- { ok = bool, message = string } from the last expor
 -- "Revert All Manual Changes" status - same pattern as export_status
 -- above (a one-shot message from the last click, not a persisted field).
 local revert_status = nil
+local REVERT_CONFIRM_POPUP_ID = "ui_chrome_revert_confirm_popup" -- "are you sure?" gate in front of the actual revert - see M.draw_score_settings
 
 -- Edit Mode (tab_editor.lua): toggles the tab staff between today's View
 -- Mode (note_editor.lua's click-to-correct popup, unchanged) and a new
@@ -510,39 +511,38 @@ local function default_export_path(cfg)
   return dir .. name .. ".pdf"
 end
 
--- Draws the settings panel: score header info (title/composer/arranger,
--- see config.lua's header) in its own "Score Info" section, first since
--- it's the score's own identity; then instrument
--- preset, string count, tuning preset dropdown, per-string note-name
--- fields, capo, max fret, key signature. The instrument/tuning/key summary
--- itself (M.instrument_summary/M.current_key_label) is drawn by the
--- CALLER, not here - main.lua draws it below its own Measure Correction
--- section, and score_render.lua's printed header reuses the exact same two
--- functions, so every place this info shows up is worded identically.
+-- Draws the "Score Settings" section: score header info (title/composer/
+-- arranger, see config.lua's header), instrument preset, string count,
+-- tuning preset dropdown, per-string note-name fields, capo, max fret, key
+-- signature, colors, and Manual Overrides (Revert All Manual Changes,
+-- behind its own confirmation popup) - everything about how the score is
+-- CONFIGURED, nested under one outer collapsing header so the whole panel
+-- reads as a short menu (Score Settings / Measure Correction Tool / Print
+-- & Export / mode toggles - see main.lua for why they're split across
+-- three functions instead of staying one monolithic M.draw) rather than
+-- five separate top-level sections competing for space. Each piece keeps
+-- its own nested CollapsingHeader (Dear ImGui nests these fine), so
+-- collapsing "Score Settings" itself hides all of them at once, and each
+-- can still be individually expanded/collapsed within it.
+-- The instrument/tuning/key summary itself (M.instrument_summary/M.
+-- current_key_label) is drawn by the CALLER, not here - score_render.lua's
+-- own header (both the live view and the printed page) reuses the exact
+-- same two functions, so every place this info shows up is worded
+-- identically.
 -- Returns true if anything changed this frame - callers should treat that
--- as "please recompute,"
--- alongside their own note-hash check (see header comment: none of these
--- settings touch the MIDI take, so a hash check alone never notices them).
--- Second return value: edit_mode (boolean) - whether the tab staff is
--- currently in Edit Mode (tab_editor.lua) rather than View Mode
--- (note_editor.lua) - the caller uses this to pick which module's
--- check_system runs on a staff click each frame (see main.lua).
+-- as "please recompute," alongside their own note-hash check (see header
+-- comment: none of these settings touch the MIDI take directly - except
+-- Revert All Manual Changes, which does, and reports its own change via
+-- on_revert_all's return, folded into this same return value).
 -- take: the currently active take (may be nil, e.g. nothing selected) -
 -- used only to also save_for_take on a change, so this specific item
 -- remembers it; safe to pass nil, that save just no-ops.
--- on_export: optional function(filepath) -> ok, message, called when the
--- "Export to PDF" button (Print/Export section, below) is clicked -
--- main.lua supplies this, closing over its own cached render model/ctx
--- (pdf_export.lua's actual export function needs both, neither of which
--- this UI-only module has any business knowing about). Omit it (or pass
--- nil) and the section still draws but the button just does nothing -
--- safe for any future caller that doesn't wire printing up yet.
--- on_revert_all: optional function(), called when "Revert All Manual
--- Changes" (below) is clicked - main.lua supplies note_editor.revert_all
--- closed over the current take, the same indirection on_export uses,
--- since this UI-only module has no business touching the MIDI take
--- directly. Omit it and the button still draws but does nothing.
-function M.draw(ctx, cfg, take, on_export, on_revert_all)
+-- on_revert_all: optional function() -> did_something (boolean), called
+-- once the user confirms the "Revert All Manual Changes" prompt - main.lua
+-- supplies note_editor.revert_all closed over the current take, since this
+-- UI-only module has no business touching the MIDI take directly. Omit it
+-- and the button still draws but does nothing once confirmed.
+function M.draw_score_settings(ctx, cfg, take, on_revert_all)
   if not buffers_initialized then
     sync_buffers(cfg.tuning)
     buffers_initialized = true
@@ -550,18 +550,22 @@ function M.draw(ctx, cfg, take, on_export, on_revert_all)
 
   local changed = false
 
-  -- Always visible, at the very top - this changes what every click on
-  -- the staff does, so it needs to be seen before scrolling past any
-  -- other section, unlike the passive display toggles ("Show Note
-  -- Names") tucked at the bottom. See edit_mode's own comment above for
-  -- why this isn't persisted across sessions.
-  local edit_mode_changed, new_edit_mode = reaper.ImGui_Checkbox(ctx, "Edit Mode (create/delete notes)", edit_mode)
-  if edit_mode_changed then
-    edit_mode = new_edit_mode
+  if not reaper.ImGui_CollapsingHeader(ctx, "Score Settings", nil) then
+    return changed
   end
-  reaper.ImGui_Separator(ctx)
+
+  -- Indented for the rest of this function (one Unindent right before the
+  -- final save/return below) so the five sub-sections read as visually
+  -- nested under "Score Settings" rather than flush with it - Dear ImGui's
+  -- CollapsingHeader doesn't indent its own body by default, which made
+  -- the whole panel read as one flat list of headers regardless of
+  -- nesting. Each sub-section ALSO indents its own body one further level
+  -- (see each one below), so a field reads as belonging to e.g. "Score
+  -- Info" specifically, not just "somewhere under Score Settings."
+  reaper.ImGui_Indent(ctx)
 
   if reaper.ImGui_CollapsingHeader(ctx, "Score Info", nil) then
+    reaper.ImGui_Indent(ctx)
     local rv_title, new_title = reaper.ImGui_InputText(ctx, "Title", cfg.title or "")
     if rv_title then
       cfg.title = new_title
@@ -579,9 +583,11 @@ function M.draw(ctx, cfg, take, on_export, on_revert_all)
       cfg.arranger = new_arranger
       changed = true
     end
+    reaper.ImGui_Unindent(ctx)
   end
 
   if reaper.ImGui_CollapsingHeader(ctx, "Instrument Settings", nil) then
+    reaper.ImGui_Indent(ctx)
     cfg.instrument = cfg.instrument or "Guitar"
     if reaper.ImGui_BeginCombo(ctx, "Instrument", cfg.instrument) then
       for _, instrument in ipairs(INSTRUMENTS) do
@@ -655,9 +661,11 @@ function M.draw(ctx, cfg, take, on_export, on_revert_all)
         changed = true
       end
     end
+    reaper.ImGui_Unindent(ctx)
   end
 
   if reaper.ImGui_CollapsingHeader(ctx, "Key Signature", nil) then
+    reaper.ImGui_Indent(ctx)
     local current_key_count = cfg.key_count or 0
     local current_key = nil
     for _, k in ipairs(notation_model.KEYS) do
@@ -676,9 +684,11 @@ function M.draw(ctx, cfg, take, on_export, on_revert_all)
       end
       reaper.ImGui_EndCombo(ctx)
     end
+    reaper.ImGui_Unindent(ctx)
   end
 
-  if reaper.ImGui_CollapsingHeader(ctx, "Colors", nil) then
+  if reaper.ImGui_CollapsingHeader(ctx, "Score Color Scheme", nil) then
+    reaper.ImGui_Indent(ctx)
     local bg_changed, new_bg = reaper.ImGui_ColorEdit4(ctx, "Background", cfg.color_bg)
     if bg_changed then
       cfg.color_bg = new_bg
@@ -693,85 +703,154 @@ function M.draw(ctx, cfg, take, on_export, on_revert_all)
       cfg.color_fg = new_fg
       changed = true
     end
-  end
-
-  if reaper.ImGui_CollapsingHeader(ctx, "Print / Export", nil) then
-    if not export_path_buf then
-      export_path_buf = default_export_path(cfg)
-    end
-
-    local rv_path, new_path = reaper.ImGui_InputText(ctx, "Output Path", export_path_buf)
-    if rv_path then
-      export_path_buf = new_path
-    end
-
-    -- Trades text/notehead size against measures-per-line - see
-    -- config.lua's print_scale comment for what pdf_export.lua does with
-    -- this. Range floors at 0.15 (well past the point of legibility, but
-    -- still a finite page) and caps at 1.0 (this app's own on-screen
-    -- pixel size - going higher would only reproduce the original
-    -- "prints out massive" problem this field exists to fix).
-    local rv_scale, new_scale = reaper.ImGui_SliderDouble(ctx, "Print Scale", cfg.print_scale or 0.4, 0.15, 1.0, "%.2f")
-    if rv_scale then
-      cfg.print_scale = new_scale
-      M.save_persisted(cfg)
-    end
-
-    if reaper.ImGui_Button(ctx, "Export to PDF") then
-      local path = export_path_buf
-      if not path:lower():match("%.pdf$") then path = path .. ".pdf" end
-      if on_export then
-        local ok, message = on_export(path)
-        export_status = { ok = ok, message = message or (ok and ("Saved to " .. path) or "Export failed") }
-      else
-        export_status = { ok = false, message = "Printing isn't wired up." }
-      end
-    end
-
-    if export_status then
-      -- Fixed status colors (not this app's own foreground/background
-      -- palette) - a status message is chrome, not part of the printed
-      -- score itself, so it doesn't need to track the Colors section.
-      local status_color = export_status.ok and 0x60FF60FF or 0xFF6060FF
-      reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), status_color)
-      reaper.ImGui_TextWrapped(ctx, export_status.message)
-      reaper.ImGui_PopStyleColor(ctx)
-    end
+    reaper.ImGui_Unindent(ctx)
   end
 
   if reaper.ImGui_CollapsingHeader(ctx, "Manual Overrides", nil) then
+    reaper.ImGui_Indent(ctx)
     reaper.ImGui_TextWrapped(ctx,
       "Clears every manual string/fret pin and shamisen technique tag on this take, letting the heuristic " ..
       "re-decide everything. One REAPER undo step - Ctrl+Z brings it all back.")
+    -- Gated behind a confirmation popup rather than acting the instant
+    -- the button is clicked - this wipes every manual correction on the
+    -- take at once, the kind of broad, hard-to-notice-until-later action
+    -- worth an explicit "are you sure" even though it's undoable.
     if reaper.ImGui_Button(ctx, "Revert All Manual Changes") then
-      if on_revert_all then
-        local did_something = on_revert_all()
-        revert_status = did_something and "Reverted." or "Nothing to revert - no manual pins or technique tags on this take."
-      else
-        revert_status = "Reverting isn't wired up."
+      reaper.ImGui_OpenPopup(ctx, REVERT_CONFIRM_POPUP_ID)
+    end
+    if reaper.ImGui_BeginPopup(ctx, REVERT_CONFIRM_POPUP_ID) then
+      reaper.ImGui_Text(ctx, "Revert all manual string/fret pins and technique tags?")
+      reaper.ImGui_TextWrapped(ctx, "The fret-assignment heuristic will re-decide everything.\nThis can be undone with Ctrl+Z.")
+      if reaper.ImGui_Button(ctx, "Revert") then
+        if on_revert_all then
+          local did_something = on_revert_all()
+          revert_status = did_something and "Reverted." or "Nothing to revert - no manual pins or technique tags on this take."
+        else
+          revert_status = "Reverting isn't wired up."
+        end
+        reaper.ImGui_CloseCurrentPopup(ctx)
       end
+      reaper.ImGui_SameLine(ctx)
+      if reaper.ImGui_Button(ctx, "Cancel") then
+        reaper.ImGui_CloseCurrentPopup(ctx)
+      end
+      reaper.ImGui_EndPopup(ctx)
     end
     if revert_status then
       reaper.ImGui_TextWrapped(ctx, revert_status)
     end
+    reaper.ImGui_Unindent(ctx)
   end
 
-  -- Always visible (not tucked in a collapsible section) since it's a
-  -- quick view toggle a user flips on and off often, not a one-time
-  -- setup field - see config.lua's header for why it's a plain global
-  -- preference like Colors, with no per-take save of its own.
-  local nn_changed, new_show_note_names = reaper.ImGui_Checkbox(ctx, "Show Note Names", cfg.show_note_names or false)
-  if nn_changed then
-    cfg.show_note_names = new_show_note_names
-    changed = true
-  end
+  reaper.ImGui_Unindent(ctx)
 
   if changed then
     M.save_persisted(cfg)
     M.save_for_take(take, cfg)
   end
 
-  return changed, edit_mode
+  return changed
+end
+
+-- Draws the "Print / Export" section - output path, print scale, and the
+-- Export to PDF button/status. Split out of the old monolithic M.draw so
+-- main.lua can position it between Measure Correction Tool and the Edit
+-- Mode/Show Note Names toggles (see main.lua's own comment for why that
+-- ordering matters and why this can't just live inside M.draw_score_
+-- settings).
+-- on_export: optional function(filepath) -> ok, message, called when the
+-- "Export to PDF" button is clicked - main.lua supplies this, closing over
+-- its own cached render model/ctx (pdf_export.lua's actual export function
+-- needs both, neither of which this UI-only module has any business
+-- knowing about). Omit it (or pass nil) and the section still draws but
+-- the button just does nothing - safe for any future caller that doesn't
+-- wire printing up yet.
+function M.draw_print_export(ctx, cfg, on_export)
+  if not reaper.ImGui_CollapsingHeader(ctx, "Print / Export", nil) then
+    return
+  end
+  reaper.ImGui_Indent(ctx)
+
+  if not export_path_buf then
+    export_path_buf = default_export_path(cfg)
+  end
+
+  local rv_path, new_path = reaper.ImGui_InputText(ctx, "Output Path", export_path_buf)
+  if rv_path then
+    export_path_buf = new_path
+  end
+
+  -- Trades text/notehead size against measures-per-line - see config.lua's
+  -- print_scale comment for what pdf_export.lua does with this. Range
+  -- floors at 0.15 (well past the point of legibility, but still a finite
+  -- page) and caps at 1.0 (this app's own on-screen pixel size - going
+  -- higher would only reproduce the original "prints out massive" problem
+  -- this field exists to fix).
+  local rv_scale, new_scale = reaper.ImGui_SliderDouble(ctx, "Print Scale", cfg.print_scale or 0.4, 0.15, 1.0, "%.2f")
+  if rv_scale then
+    cfg.print_scale = new_scale
+    M.save_persisted(cfg)
+  end
+
+  if reaper.ImGui_Button(ctx, "Export to PDF") then
+    local path = export_path_buf
+    if not path:lower():match("%.pdf$") then path = path .. ".pdf" end
+    if on_export then
+      local ok, message = on_export(path)
+      export_status = { ok = ok, message = message or (ok and ("Saved to " .. path) or "Export failed") }
+    else
+      export_status = { ok = false, message = "Printing isn't wired up." }
+    end
+  end
+
+  if export_status then
+    -- Fixed status colors (not this app's own foreground/background
+    -- palette) - a status message is chrome, not part of the printed
+    -- score itself, so it doesn't need to track the Colors section.
+    local status_color = export_status.ok and 0x60FF60FF or 0xFF6060FF
+    reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), status_color)
+    reaper.ImGui_TextWrapped(ctx, export_status.message)
+    reaper.ImGui_PopStyleColor(ctx)
+  end
+
+  reaper.ImGui_Unindent(ctx)
+end
+
+-- Draws Edit Mode and Show Note Names on ONE row, last in the settings
+-- panel - both are quick, frequently-flipped toggles rather than one-time
+-- setup fields, so neither is tucked in a collapsing section, and they
+-- share a row (via SameLine) rather than each taking a full line.
+-- Returns edit_mode (boolean) - whether the tab staff is currently in Edit
+-- Mode (tab_editor.lua) rather than View Mode (note_editor.lua) - the
+-- caller uses this to pick which module's check_system runs on a staff
+-- click each frame (see main.lua). Unlike M.draw_score_settings, this has
+-- no "please recompute" return: edit_mode only decides which module gets
+-- clicks (no render-model impact), and show_note_names is read live at
+-- DRAW TIME by draw_tab.lua/draw_notation.lua/score_render.lua, never
+-- baked into cached_render_model - so there's nothing here a caller would
+-- ever need to treat as a cache-invalidation signal.
+-- take: passed through only to save_for_take when Show Note Names
+-- changes, same as every other persisted field - safe to pass nil.
+function M.draw_mode_toggles(ctx, cfg, take)
+  -- Module-local edit_mode, not persisted to ExtState/take (see its own
+  -- comment above) - every fresh script start opens in View Mode so a
+  -- session never opens silently armed to write MIDI on a stray staff
+  -- click.
+  local edit_mode_changed, new_edit_mode = reaper.ImGui_Checkbox(ctx, "Edit Mode (create/delete notes)", edit_mode)
+  if edit_mode_changed then
+    edit_mode = new_edit_mode
+  end
+
+  reaper.ImGui_SameLine(ctx)
+
+  local nn_changed, new_show_note_names = reaper.ImGui_Checkbox(ctx, "Show Note Names", cfg.show_note_names or false)
+  if nn_changed then
+    cfg.show_note_names = new_show_note_names
+    M.save_persisted(cfg)
+    M.save_for_take(take, cfg)
+  end
+
+  return edit_mode
 end
 
 return M

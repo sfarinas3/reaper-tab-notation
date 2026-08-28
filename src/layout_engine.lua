@@ -94,12 +94,30 @@
 -- own raw duration, the same rule.
 
 local config = require('config')
+local notation_model = require('notation_model') -- safe: notation_model only requires config, no cycle
 
 local M = {}
 
 M.PPQ_PER_QUARTER = config.layout.ppq_per_quarter
 local GRACE_NOTE_TICKS = M.PPQ_PER_QUARTER / 32 -- half of a 64th note - config.layout.duration_classes' own shortest real class
 local GRACE_NOTE_WIDTH = 10 -- px - a small fixed width, not duration-proportional
+
+-- Guitar technique ids for a legato (hammer-on/pull-off) tag - source of
+-- truth is tab_editor.lua's own GUITAR_TECHNIQUE_LEGATO/_LEGATO_TAP (the
+-- "l"/"lt" fret suffixes write these ids into midi_read.lua's technique
+-- P_EXT map); duplicated here rather than required, since tab_editor.lua
+-- already requires this module and Lua can't require back the other way.
+-- Same duplicated-but-commented-in-sync convention note_editor.lua/draw_
+-- tab.lua's own TECHNIQUE_SYMBOLS table already uses for the Shamisen ids.
+-- GUITAR_TECHNIQUE_LEGATO_TAP ("lt") means legato AND tap together - a
+-- note can carry both at once (unlike the rest of the technique ids, which
+-- are mutually exclusive) - so the slur check below has to treat it as a
+-- legato tag too, not just the plain GUITAR_TECHNIQUE_LEGATO id.
+local GUITAR_TECHNIQUE_LEGATO = 101
+local GUITAR_TECHNIQUE_LEGATO_TAP = 103
+local function is_legato_technique(id)
+  return id == GUITAR_TECHNIQUE_LEGATO or id == GUITAR_TECHNIQUE_LEGATO_TAP
+end
 
 -- Interpolates a pixel width for duration_ticks from config.layout's
 -- duration-class table, in log-tick space so the curve is smooth rather
@@ -171,6 +189,34 @@ end
 -- within one beat (uncommon, but it does happen) - accepted since false
 -- positives on repeated notes (fast or, as above, beat-or-longer) are the
 -- more common and more disruptive case.
+-- Also checked: each factor in TUPLET_SCALE_FACTORS, a tuplet-scaled
+-- candidate (e.g. an eighth-triplet's raw ~320-tick duration against an
+-- eighth's 480-tick base, factor 2/3) - same reasoning as the dotted
+-- (x1.5) candidate above: a tuplet note is already a complete,
+-- independently-nameable value the moment it's detected as one
+-- (notation_model.detect_tuplets), so it shouldn't be tied just for
+-- crossing a beat boundary either. Kept as a plain tick-value check here
+-- rather than threading detect_tuplets' own membership info into this
+-- function, so has_clean_duration stays a pure function of one duration
+-- with no pass-ordering dependency - and it's strictly more robust, since
+-- it still recognizes a tuplet note's completeness even in a case
+-- detect_tuplets itself declined to tag (e.g. adjacent to a rest).
+-- Factors are derived from notation_model.TUPLET_SHAPES (ratio_den/count),
+-- deduplicated - the two triplet shapes and the sextuplet all share 2/3 -
+-- so this list never silently drifts out of sync with which shapes are
+-- actually detected.
+local TUPLET_SCALE_FACTORS = {}
+do
+  local seen = {}
+  for _, shape in ipairs(notation_model.TUPLET_SHAPES) do
+    local factor = shape.ratio_den / shape.count
+    if not seen[factor] then
+      seen[factor] = true
+      TUPLET_SCALE_FACTORS[#TUPLET_SCALE_FACTORS + 1] = factor
+    end
+  end
+end
+
 local TIE_DURATION_TOLERANCE = 10 -- ticks - forgives minor recording/quantization imprecision
 local function has_clean_duration(duration_ticks)
   local quarter = M.PPQ_PER_QUARTER
@@ -179,17 +225,34 @@ local function has_clean_duration(duration_ticks)
         or math.abs(duration_ticks - base * 1.5) <= TIE_DURATION_TOLERANCE then
       return true
     end
+    for _, factor in ipairs(TUPLET_SCALE_FACTORS) do
+      if math.abs(duration_ticks - base * factor) <= TIE_DURATION_TOLERANCE then
+        return true
+      end
+    end
   end
   return false
 end
 
 -- Returns a render model: list of
---   { tick, x, duration_ticks, is_grace, notes = {..., tied_from_prev, tied_to_next} }
--- Only x differs in meaning per staff; y is each drawer's own concern.
+--   { tick, x, duration_ticks, notated_ticks, is_grace, tuplet,
+--     notes = {..., tied_from_prev, tied_to_next} }
+-- duration_ticks is the true gap-capped elapsed-time span (barline-split
+-- math, "let ring" sustain, etc. all key off this). notated_ticks is what
+-- the note should be CLASSIFIED as for rendering purposes (spacing, flags,
+-- dots, beamability) - equal to duration_ticks except for a detected
+-- tuplet member, where it's the plain-equivalent value the tuplet note
+-- actually reads as (see opts.tuplet_lookup below). Every classification
+-- call site elsewhere in the app should read notated_ticks, not
+-- duration_ticks. tuplet is nil, or {id, index, count, ratio_num,
+-- ratio_den, nominal_ticks} from notation_model.detect_tuplets, for
+-- bracket/numeral rendering. Only x differs in meaning per staff; y is
+-- each drawer's own concern.
 function M.compute(events, opts)
   opts = opts or {}
   local measure_width = opts.measure_width
   local beat_ticks_lookup = opts.beat_ticks_lookup or function() return M.PPQ_PER_QUARTER end
+  local tuplet_lookup = opts.tuplet_lookup
   local measure_ticks = opts.measure_ticks
   local min_gap = config.layout.min_gap
   local x = config.layout.left_margin
@@ -218,10 +281,13 @@ function M.compute(events, opts)
   -- and returns it, so the caller can chain barline-split segments.
   local function emit(tick, duration_ticks, notes)
     local is_grace = duration_ticks < GRACE_NOTE_TICKS
-    local entry = { tick = tick, x = x, duration_ticks = duration_ticks, notes = notes, is_grace = is_grace }
+    local tuplet = tuplet_lookup and tuplet_lookup(tick)
+    local notated_ticks = (tuplet and tuplet.nominal_ticks) or duration_ticks
+    local entry = { tick = tick, x = x, duration_ticks = duration_ticks, notated_ticks = notated_ticks,
+      notes = notes, is_grace = is_grace, tuplet = tuplet }
     result[#result + 1] = entry
     local content_width = measure_width and measure_width(entry) or 0
-    local base_width = is_grace and GRACE_NOTE_WIDTH or width_for_duration(duration_ticks)
+    local base_width = is_grace and GRACE_NOTE_WIDTH or width_for_duration(notated_ticks)
     local step_width = math.max(base_width, content_width + min_gap)
     x = x + step_width
     return entry
@@ -260,6 +326,7 @@ function M.compute(events, opts)
       for k, v in pairs(note) do copy[k] = v end
 
       local tied = false
+      local legato = false
       if note.string then
         local prev = prev_by_string[note.string]
         if prev and prev.pitch == note.pitch and prev.endppq == note.startppq then
@@ -268,8 +335,19 @@ function M.compute(events, opts)
           local prev_duration = prev.endppq - prev.startppq
           tied = crosses_beat and not has_clean_duration(prev_duration)
         end
+        -- Legato (hammer-on/pull-off) slur: BOTH this note and the
+        -- immediately preceding same-string note (no gap between them)
+        -- must carry the legato tag - a lone "l"-tagged note with an
+        -- untagged neighbor draws nothing, matching "a legato only shows
+        -- across at least 2 tagged notes." Exact endppq==startppq
+        -- equality, no tolerance, same precision as the tie check above.
+        if prev and prev.endppq == note.startppq
+            and is_legato_technique(prev.technique) and is_legato_technique(note.technique) then
+          legato = true
+        end
       end
       copy.tied_from_prev = tied
+      copy.legato_from_prev = legato
 
       notes[i] = copy
     end
@@ -340,7 +418,7 @@ function M.x_for_tick(render_model, tick)
   -- Beyond the last event: extrapolate using the rate implied by its own
   -- duration-class width (the same width step.compute used to place it).
   local last = render_model[n]
-  local rate = width_for_duration(last.duration_ticks) / math.max(last.duration_ticks, 1)
+  local rate = width_for_duration(last.notated_ticks) / math.max(last.duration_ticks, 1)
   return last.x + (tick - last.tick) * rate
 end
 
