@@ -70,11 +70,36 @@ the finish page until the user closed REAPER. It also uses
 `skipifsilent`, so an unattended/silent install never launches REAPER as
 a side effect.
 
-### Building it
+### Building and publishing it
 
-1. Install [Inno Setup](https://jrsoftware.org/isinfo.php) (free).
-2. From the repo root: `ISCC installer\setup.iss`
-3. Output: `dist\ReaperTabNotation-Setup.exe` - this is the file to share.
+1. Install [Inno Setup](https://jrsoftware.org/isinfo.php) (free) - one-time
+   setup. `winget install --id JRSoftware.InnoSetup` works too; it lands at
+   `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`.
+2. From the repo root, build the installer:
+   ```
+   "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" installer\setup.iss
+   ```
+   Output: `dist\ReaperTabNotation-Setup.exe` - this is the file to share.
+3. Create the GitHub release, if it doesn't already exist (skip if you
+   created it on GitHub's website already):
+   ```
+   gh release create v1.0.2 --title "rTAB v1.0.2" --notes "What changed"
+   ```
+4. Upload the installer as a release asset - creating a release on its own
+   does NOT attach any files, this step is required separately:
+   ```
+   gh release upload v1.0.2 dist\ReaperTabNotation-Setup.exe
+   ```
+   Add `--clobber` if you're replacing a file already attached to that
+   release.
+5. Access/download it:
+   - Direct link:
+     `https://github.com/sfarinas3/reaper-tab-notation/releases/download/<tag>/ReaperTabNotation-Setup.exe`
+   - Or browse to the repo's Releases page and download from "Assets".
+6. Sanity-check what's actually attached to a release at any time:
+   ```
+   gh release view <tag> --json assets -q '.assets[].name'
+   ```
 
 ## Deferred: license-key prompt
 
