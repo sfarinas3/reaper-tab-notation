@@ -147,6 +147,99 @@ function M.written_pitch(midi_pitch)
   return midi_pitch + 12
 end
 
+-- Translates between this app's INTERNAL string index (config.tuning's own
+-- array position - always 1 = highest-pitched/thinnest string, #tuning =
+-- lowest-pitched/thickest, regardless of instrument; see config.lua's
+-- header) and the string NUMBER a user actually types/sees. Guitar's own
+-- numbering already matches the internal index exactly (string 1 = high
+-- e), so this is the identity for Guitar. Shamisen numbers the OPPOSITE
+-- way - the lowest string is 1, the highest is the highest number (e.g. 3
+-- on a 3-string shamisen) - so for Shamisen this reverses the range.
+--
+-- Self-inverse (reversing a 1..n range twice returns the original), so the
+-- exact same formula converts in EITHER direction - internal-to-display
+-- when formatting a label/text field, or display-to-internal when parsing
+-- one back. Every user-facing string-number label or typed field should
+-- go through this rather than showing/parsing the internal index directly,
+-- so a numbering fix only ever needs to happen here - see ui_chrome.lua's
+-- tuning fields/instrument summary, note_editor.lua's string-pin popup,
+-- and tab_editor.lua's String field/Tab Code/Move-to-String popup for the
+-- call sites that rely on this.
+function M.display_string_number(cfg, string_idx)
+  if cfg.instrument == "Shamisen" then
+    return #cfg.tuning - string_idx + 1
+  end
+  return string_idx
+end
+
+-- Shamisen tsubo (fret/position) numbering is NOT consecutive integers -
+-- traditional shamisen tab gives each 12-semitone octave 10 running
+-- integer labels plus 2 "iro" (half-tone) positions marked with a
+-- sharp/flat-style symbol instead of a number: "#"/"b" in the octave
+-- containing the open string, "1#"/"1b" the next octave up, "2#"/"2b" the
+-- one after that, and so on - the integer count keeps climbing by 10 each
+-- octave (...9, 10, 11...19, 20...) around the two skipped/symbol slots.
+-- User-specified mapping, semitone -> label:
+--   0,1,2,3,#,4,5,6,7,8,9,b,10,11,12,13,1#,14,15,16,17,18,19,1b,20,...
+-- Guitar frets are already plain consecutive integers, so display_fret_
+-- label/parse_fret_label are the identity (tostring/tonumber) for Guitar -
+-- this pair only actually does something for Shamisen. Every user-facing
+-- fret label/typed field should go through these instead of tostring(fret)
+-- or tonumber(text) directly, so this numbering only ever needs to happen
+-- here - see draw_tab.lua's label_for and tab_editor.lua's parse_fret_
+-- input/format_fret_with_technique for the call sites that rely on this.
+local function shamisen_fret_to_label(fret)
+  local oct = math.floor(fret / 12)
+  local pos = fret % 12
+  local prefix = oct == 0 and "" or tostring(oct)
+  if pos == 4 then return prefix .. "#" end
+  if pos == 11 then return prefix .. "b" end
+  local step = pos <= 3 and pos or (pos - 1)
+  return tostring(oct * 10 + step)
+end
+
+-- Inverse of shamisen_fret_to_label - parses a typed/rendered Shamisen
+-- fret label back into a semitone fret number, or nil if it isn't a valid
+-- label (same nil-on-invalid contract as tonumber). Accepts "#"/"b" case-
+-- insensitively (matches strip_technique_suffix's own case-insensitivity
+-- in tab_editor.lua) with an optional leading octave-count prefix.
+local function shamisen_label_to_fret(label)
+  local trimmed = (label or ""):match("^%s*(.-)%s*$")
+  if trimmed == "" then return nil end
+
+  local prefix, symbol = trimmed:match("^(%d*)([#bB])$")
+  if symbol then
+    local oct = tonumber(prefix) or 0
+    local pos = (symbol:lower() == "#") and 4 or 11
+    return oct * 12 + pos
+  end
+
+  local n = tonumber(trimmed)
+  if not n then return nil end
+  n = math.floor(n + 0.5)
+  if n < 0 then return nil end
+  local oct = math.floor(n / 10)
+  local step = n % 10
+  local pos = step <= 3 and step or (step + 1)
+  return oct * 12 + pos
+end
+
+function M.display_fret_label(cfg, fret)
+  if cfg.instrument == "Shamisen" then
+    return shamisen_fret_to_label(fret)
+  end
+  return tostring(fret)
+end
+
+function M.parse_fret_label(cfg, label)
+  if cfg.instrument == "Shamisen" then
+    return shamisen_label_to_fret(label)
+  end
+  local n = tonumber(label)
+  if not n then return nil end
+  return math.floor(n + 0.5)
+end
+
 local SIMPLE_NOTE_NAMES = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }
 
 -- Plain sharps-only "C4"/"F#3"/"B1" note name for a raw MIDI pitch -
@@ -897,31 +990,47 @@ function M.detect_rests(render_model, leading_tick, measure_ticks, beat_ticks_lo
     if gap > 0 then add_gap(leading_tick, gap) end
   end
 
-  for i = 1, #render_model - 1 do
+  -- running_latest_end is the latest endppq among EVERY note seen so far,
+  -- across ALL events processed up to this point - not just the current
+  -- event's own notes. Events group notes by shared ONSET tick only (see
+  -- midi_read.group_into_events), so a long note on one string that isn't
+  -- re-attacked doesn't reappear in any later event's own `notes` list -
+  -- checking only the current event's notes here would miss it and insert
+  -- a rest for a stretch where that string is actually still ringing (a
+  -- real, once-live bug: e.g. a sustained whole note on one string with
+  -- shorter notes attacking on another string partway through it wrongly
+  -- got a rest wherever those shorter notes' own short endppq fell short
+  -- of the NEXT attack, even though the long note was still sounding the
+  -- entire time). Carrying the running max forward instead means a gap is
+  -- only ever reported where NOTHING at all - on any string - is still
+  -- sounding, which is what a rest actually means for this app's one
+  -- shared tab-staff timeline.
+  local running_latest_end = nil
+  for i = 1, #render_model do
     local notes = render_model[i].notes
-    local latest_end = nil
     for j = 1, #notes do
-      if not latest_end or notes[j].endppq > latest_end then latest_end = notes[j].endppq end
+      if not running_latest_end or notes[j].endppq > running_latest_end then
+        running_latest_end = notes[j].endppq
+      end
     end
-    local next_tick = render_model[i + 1].tick
-    if latest_end and next_tick > latest_end then
-      add_gap(latest_end, next_tick - latest_end)
+
+    if i < #render_model then
+      local next_tick = render_model[i + 1].tick
+      if running_latest_end and next_tick > running_latest_end then
+        add_gap(running_latest_end, next_tick - running_latest_end)
+      end
     end
   end
 
   -- Trailing silence after the LAST event, up through this caller's own
-  -- final measure boundary - see this function's header. Mirrors the
-  -- pairwise loop above exactly, just using measure_ticks' own last entry
-  -- in place of a "next event" that doesn't exist.
+  -- final measure boundary - see this function's header. Mirrors the loop
+  -- above exactly, just using measure_ticks' own last entry in place of a
+  -- "next event" that doesn't exist; running_latest_end already reflects
+  -- every note through the last event, long-sustained or not.
   if measure_ticks and #measure_ticks > 0 and #render_model > 0 then
-    local last_notes = render_model[#render_model].notes
-    local latest_end = nil
-    for j = 1, #last_notes do
-      if not latest_end or last_notes[j].endppq > latest_end then latest_end = last_notes[j].endppq end
-    end
     local trailing_boundary = measure_ticks[#measure_ticks]
-    if latest_end and trailing_boundary > latest_end then
-      add_gap(latest_end, trailing_boundary - latest_end)
+    if running_latest_end and trailing_boundary > running_latest_end then
+      add_gap(running_latest_end, trailing_boundary - running_latest_end)
     end
   end
 

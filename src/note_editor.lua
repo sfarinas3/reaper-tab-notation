@@ -37,6 +37,7 @@
 local config = require('config')
 local ui_chrome = require('ui_chrome')
 local midi_read = require('midi_read')
+local notation_model = require('notation_model')
 
 local M = {}
 
@@ -73,6 +74,29 @@ function M.begin_frame(ctx)
   mouse_x, mouse_y = reaper.ImGui_GetMousePos(ctx)
   clicked = (not popup_was_open) and reaper.ImGui_IsMouseClicked(ctx, 0)
   best = nil
+end
+
+-- Pure predicate mirroring check_system's own radius test but independent
+-- of click state (uses this frame's mouse_x/mouse_y directly, captured in
+-- begin_frame regardless of whether a click happened) - lets main.lua's
+-- grid_overlay.lua click-to-seek check "is there a note right here" so View
+-- Mode's click-to-correct popup takes priority over seeking for the same
+-- click.
+function M.would_hit_note(origin_x, tab_origin_y, events)
+  for i = 1, #events do
+    local event = events[i]
+    local x = origin_x + event.x
+    for j = 1, #event.notes do
+      local note = event.notes[j]
+      if not note.tied_from_prev then
+        local string_idx = note.string or config.layout.x_notehead_string
+        local y = tab_origin_y + (string_idx - 1) * config.layout.line_height
+        local dx, dy = mouse_x - x, mouse_y - y
+        if math.sqrt(dx * dx + dy * dy) <= HIT_RADIUS then return true end
+      end
+    end
+  end
+  return false
 end
 
 -- Call once per system, right after draw_tab.draw for that system - needs
@@ -171,7 +195,11 @@ local function draw_popup(ctx)
     commit_edit(ctx, nil, 0)
   end
   for s = 1, n_strings do
-    local label = current_chan == s and ("String " .. s .. " (current)") or ("String " .. s)
+    -- s itself (the MIDI channel pin/internal string index) is unchanged -
+    -- only the LABEL's number flips for Shamisen, same as everywhere else
+    -- a string number is shown - see notation_model.display_string_number.
+    local display_num = notation_model.display_string_number(config, s)
+    local label = current_chan == s and ("String " .. display_num .. " (current)") or ("String " .. display_num)
     if reaper.ImGui_Selectable(ctx, label, current_chan == s) then
       commit_edit(ctx, nil, s)
     end

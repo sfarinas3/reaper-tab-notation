@@ -127,12 +127,17 @@ local INSTRUMENTS = {
 -- circled number would be the more polished look, but isn't guaranteed to
 -- be in ReaImGui's default font (same reasoning as this app's other
 -- placeholder glyphs - e.g. the plain "#"/"b" accidentals - so this
--- sticks to the always-renders fallback). The number itself still matches
--- config.tuning's own index (i.e. the "String N" fields' own numbering,
--- String 1 = highest), not this line's left-to-right reading order, so it
--- cross-references correctly against the edit fields and the note-editor
--- popup's string selector - it counts DOWN left to right here as a result
--- (lowest string is the highest-numbered one).
+-- sticks to the always-renders fallback). The number itself is the
+-- instrument-appropriate DISPLAY number (notation_model.
+-- display_string_number), not config.tuning's own raw index, so it always
+-- cross-references correctly against the edit fields/note-editor popup's
+-- string selector/tab_editor.lua's String field and Tab Code - all of
+-- which show that same display number. For Guitar that number still
+-- counts DOWN left to right (lowest string is the highest-numbered one,
+-- matching config.tuning's own high-first index). For Shamisen it counts
+-- UP left to right instead (lowest string is "1"), since Shamisen numbers
+-- strings the opposite way from Guitar - see display_string_number's own
+-- header for why.
 function M.instrument_summary(cfg)
   local name = cfg.instrument or "Guitar"
   local title = name
@@ -140,11 +145,17 @@ function M.instrument_summary(cfg)
     title = string.format("%s - %d string", name, #cfg.tuning)
   end
 
+  -- Left-to-right reading order is always lowest string first (see this
+  -- function's own header for why) regardless of numbering direction -
+  -- string_idx walks from #tuning down to 1 either way. Only the NUMBER
+  -- shown next to each one (notation_model.display_string_number) flips
+  -- for Shamisen - see that function's header.
   local n = #cfg.tuning
   local parts = {}
   for i = 1, n do
     local string_idx = n - i + 1
-    parts[i] = string.format("(%d) %s", string_idx, M.pitch_to_name(cfg.tuning[string_idx]))
+    local display_num = notation_model.display_string_number(cfg, string_idx)
+    parts[i] = string.format("(%d) %s", display_num, M.pitch_to_name(cfg.tuning[string_idx]))
   end
 
   return title, "Tuning: " .. table.concat(parts, " ")
@@ -211,12 +222,61 @@ local function apply_key_margin(cfg)
   cfg.layout.left_margin = draw_notation.left_margin_for_key(cfg.key_count or 0)
 end
 
--- The preset name matching the current tuning exactly, or "Custom" if none
--- do (including right after any manual per-string edit) - this is how the
--- preset dropdown "auto-switches to Custom" with no separate flag needed.
+-- User-saved custom tunings ("Save Tuning As..." in the Instrument
+-- Settings section) - persisted to ExtState, keyed by string count the
+-- same way PRESETS above is, so they show up in the SAME "Tuning Preset"
+-- combo, scoped to whichever string count is currently active. Each one
+-- gets its own dedicated ExtState key per field (name/tuning), rather
+-- than one packed delimited string per string count, since a user-typed
+-- name is free text that could itself contain any delimiter a packed
+-- format might pick - the same reasoning ui_chrome.lua's own TAKE_EXT_
+-- TITLE/COMPOSER/ARRANGER keys already use for score-header free text.
+-- custom_preset_count_N tracks how many slots exist for string count N;
+-- slots are only ever appended (never renumbered), so a stale slot from
+-- an earlier session always resolves correctly even if a later one was
+-- added since.
+local function custom_presets_for(n)
+  local count = tonumber(reaper.GetExtState(EXT_SECTION, "custom_preset_count_" .. n)) or 0
+  local list = {}
+  for i = 1, count do
+    local name = reaper.GetExtState(EXT_SECTION, "custom_preset_" .. n .. "_" .. i .. "_name")
+    local tuning_str = reaper.GetExtState(EXT_SECTION, "custom_preset_" .. n .. "_" .. i .. "_tuning")
+    if name ~= "" and tuning_str ~= "" then
+      local tuning = {}
+      for token in tuning_str:gmatch("[^,]+") do
+        local v = tonumber(token)
+        if v then tuning[#tuning + 1] = v end
+      end
+      if #tuning == n then
+        list[#list + 1] = { name = name, tuning = tuning }
+      end
+    end
+  end
+  return list
+end
+
+-- Appends a new custom-preset slot for tuning's own string count - always
+-- adds, never overwrites an existing slot (even one with the same typed
+-- name), keeping this as simple as PRESETS' own flat list; a user who
+-- wants to replace an old save just ends up with two entries under that
+-- name; not worth a rename/overwrite UI for what this feature asked for.
+local function save_custom_preset(name, tuning)
+  local n = #tuning
+  local count = (tonumber(reaper.GetExtState(EXT_SECTION, "custom_preset_count_" .. n)) or 0) + 1
+  local parts = {}
+  for i = 1, n do parts[i] = tostring(tuning[i]) end
+  reaper.SetExtState(EXT_SECTION, "custom_preset_" .. n .. "_" .. count .. "_name", name, true)
+  reaper.SetExtState(EXT_SECTION, "custom_preset_" .. n .. "_" .. count .. "_tuning", table.concat(parts, ","), true)
+  reaper.SetExtState(EXT_SECTION, "custom_preset_count_" .. n, tostring(count), true)
+end
+
+-- The preset name matching the current tuning exactly (built-in OR
+-- user-saved custom), or "Custom" if none do (including right after any
+-- manual per-string edit) - this is how the preset dropdown "auto-
+-- switches to Custom" with no separate flag needed.
 local function detect_preset(tuning)
-  local list = PRESETS[#tuning]
-  if list then
+  local function search(list)
+    if not list then return nil end
     for _, p in ipairs(list) do
       if #p.tuning == #tuning then
         local match = true
@@ -229,8 +289,10 @@ local function detect_preset(tuning)
         if match then return p.name end
       end
     end
+    return nil
   end
-  return "Custom"
+
+  return search(PRESETS[#tuning]) or search(custom_presets_for(#tuning)) or "Custom"
 end
 
 -- Resizes tuning to exactly n strings: truncates from the low end, or
@@ -260,6 +322,11 @@ function M.save_persisted(cfg)
   -- Same "global display preference, no per-take save" treatment as colors
   -- above - see config.lua's header.
   reaper.SetExtState(EXT_SECTION, "show_note_names", cfg.show_note_names and "1" or "0", true)
+  -- Same "global display preference, no per-take save" treatment as
+  -- show_note_names above - see config.lua's header on grid_enabled.
+  reaper.SetExtState(EXT_SECTION, "grid_enabled", cfg.grid_enabled and "1" or "0", true)
+  reaper.SetExtState(EXT_SECTION, "grid_denominator", tostring(cfg.grid_denominator or 16), true)
+  reaper.SetExtState(EXT_SECTION, "grid_triplet", cfg.grid_triplet and "1" or "0", true)
   reaper.SetExtState(EXT_SECTION, "print_scale", tostring(cfg.print_scale or 0.4), true)
   -- Composer/arranger are the one "last used globally" convenience that
   -- makes sense for score-header info - see config.lua's header. title is
@@ -324,6 +391,22 @@ function M.load_persisted(cfg)
   local show_names_str = reaper.GetExtState(EXT_SECTION, "show_note_names")
   if show_names_str ~= "" then
     cfg.show_note_names = (show_names_str == "1")
+  end
+
+  local grid_enabled_str = reaper.GetExtState(EXT_SECTION, "grid_enabled")
+  if grid_enabled_str ~= "" then
+    cfg.grid_enabled = (grid_enabled_str == "1")
+  end
+
+  local grid_denom_str = reaper.GetExtState(EXT_SECTION, "grid_denominator")
+  if grid_denom_str and grid_denom_str ~= "" then
+    local n = tonumber(grid_denom_str)
+    if n then cfg.grid_denominator = n end
+  end
+
+  local grid_triplet_str = reaper.GetExtState(EXT_SECTION, "grid_triplet")
+  if grid_triplet_str ~= "" then
+    cfg.grid_triplet = (grid_triplet_str == "1")
   end
 
   local print_scale_str = reaper.GetExtState(EXT_SECTION, "print_scale")
@@ -484,6 +567,13 @@ local export_status = nil -- { ok = bool, message = string } from the last expor
 local revert_status = nil
 local REVERT_CONFIRM_POPUP_ID = "ui_chrome_revert_confirm_popup" -- "are you sure?" gate in front of the actual revert - see M.draw_score_settings
 
+-- "Save Tuning As..." popup (see save_custom_preset) - name_buf resets to
+-- blank every time the popup (re)opens, same "fresh typed field" pattern
+-- create_status/edit_status's own buffers use in tab_editor.lua.
+local SAVE_TUNING_POPUP_ID = "ui_chrome_save_tuning_popup"
+local save_tuning_name_buf = ""
+local focus_save_tuning_input = false
+
 -- Edit Mode (tab_editor.lua): toggles the tab staff between today's View
 -- Mode (note_editor.lua's click-to-correct popup, unchanged) and a new
 -- surface for creating/deleting notes directly. Module-local, not
@@ -629,11 +719,74 @@ function M.draw_score_settings(ctx, cfg, take, on_revert_all)
           changed = true
         end
       end
+
+      -- User-saved custom tunings (see save_custom_preset), listed after
+      -- the built-in presets above under their own separator - same combo,
+      -- same Selectable-picks-it-and-syncs-buffers behavior, just a
+      -- different source list.
+      local custom_list = custom_presets_for(n)
+      if #custom_list > 0 then
+        reaper.ImGui_Separator(ctx)
+        for _, p in ipairs(custom_list) do
+          local is_selected = (p.name == current_preset)
+          if reaper.ImGui_Selectable(ctx, p.name, is_selected) then
+            cfg.tuning = copy_array(p.tuning)
+            sync_buffers(cfg.tuning)
+            changed = true
+          end
+        end
+      end
       reaper.ImGui_EndCombo(ctx)
     end
 
+    -- "Save Tuning As..." - names and persists cfg's CURRENT tuning (as
+    -- typed into the String fields below, not whatever preset happens to
+    -- be selected) so it reappears in the combo above, scoped to this
+    -- same string count, in every future session. Gated behind a small
+    -- named-input popup rather than saving instantly, since a save needs
+    -- a name to be worth anything.
+    if reaper.ImGui_Button(ctx, "Save Tuning As...") then
+      save_tuning_name_buf = ""
+      focus_save_tuning_input = true
+      reaper.ImGui_OpenPopup(ctx, SAVE_TUNING_POPUP_ID)
+    end
+    if reaper.ImGui_BeginPopup(ctx, SAVE_TUNING_POPUP_ID) then
+      reaper.ImGui_Text(ctx, "Save the current tuning as:")
+      if focus_save_tuning_input then
+        reaper.ImGui_SetKeyboardFocusHere(ctx)
+        focus_save_tuning_input = false
+      end
+      -- Deliberately NOT InputTextFlags_EnterReturnsTrue - see tab_editor.
+      -- lua's own comment on its Fret field for the exact bug this avoids:
+      -- that flag doesn't reliably keep the returned buffer in sync when
+      -- the field loses focus any way other than Enter (e.g. clicking
+      -- straight on the Save button below), which would silently save
+      -- under a stale/blank name. Plain InputText syncs every frame
+      -- regardless, at the cost of "Enter to save" - Save must be clicked.
+      local _, new_name = reaper.ImGui_InputText(ctx, "Name", save_tuning_name_buf)
+      save_tuning_name_buf = new_name
+      local can_save = save_tuning_name_buf:match("%S") ~= nil -- not blank/whitespace-only
+      if reaper.ImGui_Button(ctx, "Save") and can_save then
+        save_custom_preset(save_tuning_name_buf, cfg.tuning)
+        reaper.ImGui_CloseCurrentPopup(ctx)
+      end
+      reaper.ImGui_SameLine(ctx)
+      if reaper.ImGui_Button(ctx, "Cancel") then
+        reaper.ImGui_CloseCurrentPopup(ctx)
+      end
+      reaper.ImGui_EndPopup(ctx)
+    end
+
     for i = 1, n do
-      local rv_s, new_text = reaper.ImGui_InputText(ctx, "String " .. i, string_buf[i] or "")
+      -- Label shows the instrument-appropriate display number
+      -- (notation_model.display_string_number - Shamisen numbers low-to-
+      -- high, the opposite of Guitar/this array's own index) but the
+      -- widget's ID stays keyed on i itself (the "##string_i" suffix, not
+      -- shown) so its focus/identity never changes just because the
+      -- instrument toggle flips which number is shown.
+      local display_num = notation_model.display_string_number(cfg, i)
+      local label = "String " .. display_num .. "##string_" .. i
+      local rv_s, new_text = reaper.ImGui_InputText(ctx, label, string_buf[i] or "")
       if rv_s then
         string_buf[i] = new_text
         local pitch = M.name_to_pitch(new_text)
@@ -816,19 +969,24 @@ function M.draw_print_export(ctx, cfg, on_export)
   reaper.ImGui_Unindent(ctx)
 end
 
--- Draws Edit Mode and Show Note Names on ONE row, last in the settings
--- panel - both are quick, frequently-flipped toggles rather than one-time
--- setup fields, so neither is tucked in a collapsing section, and they
--- share a row (via SameLine) rather than each taking a full line.
--- Returns edit_mode (boolean) - whether the tab staff is currently in Edit
--- Mode (tab_editor.lua) rather than View Mode (note_editor.lua) - the
--- caller uses this to pick which module's check_system runs on a staff
--- click each frame (see main.lua). Unlike M.draw_score_settings, this has
--- no "please recompute" return: edit_mode only decides which module gets
--- clicks (no render-model impact), and show_note_names is read live at
--- DRAW TIME by draw_tab.lua/draw_notation.lua/score_render.lua, never
--- baked into cached_render_model - so there's nothing here a caller would
--- ever need to treat as a cache-invalidation signal.
+-- Draws Edit Mode, Show Note Names, and Djent Note Leap Optimization on ONE
+-- row, last in the settings panel - all three are quick, frequently-
+-- flipped toggles rather than one-time setup fields, so none is tucked in
+-- a collapsing section, and they share a row (via SameLine) rather than
+-- each taking a full line.
+-- Returns edit_mode (boolean), needs_recompute (boolean). edit_mode is
+-- whether the tab staff is currently in Edit Mode (tab_editor.lua) rather
+-- than View Mode (note_editor.lua) - the caller uses this to pick which
+-- module's check_system runs on a staff click each frame (see main.lua).
+-- needs_recompute is true exactly the frame Djent Note Leap Optimization
+-- is flipped - unlike edit_mode/show_note_names (neither has any render-
+-- model impact: edit_mode only decides which module gets clicks,
+-- show_note_names is read live at DRAW TIME by draw_tab.lua/draw_notation.
+-- lua/score_render.lua, never baked into cached_render_model), toggling
+-- config.wide_leap_enabled changes fret_heuristic.assign_events' own
+-- output, so main.lua needs to know to re-run it the same way a Score
+-- Settings change does (see M.draw_score_settings's own "please
+-- recompute" return this mirrors).
 -- take: passed through only to save_for_take when Show Note Names
 -- changes, same as every other persisted field - safe to pass nil.
 function M.draw_mode_toggles(ctx, cfg, take)
@@ -850,7 +1008,80 @@ function M.draw_mode_toggles(ctx, cfg, take)
     M.save_for_take(take, cfg)
   end
 
-  return edit_mode
+  reaper.ImGui_SameLine(ctx)
+
+  -- Not persisted (see config.wide_leap_enabled's own header) - a style
+  -- choice made per editing session, same "not saved" treatment as
+  -- edit_mode above, not a per-take property like instrument/tuning.
+  local wl_changed, new_wide_leap = reaper.ImGui_Checkbox(ctx, "Djent Note Leap Optimization", cfg.wide_leap_enabled or false)
+  local needs_recompute = false
+  if wl_changed then
+    cfg.wide_leap_enabled = new_wide_leap
+    needs_recompute = true
+  end
+
+  return edit_mode, needs_recompute
+end
+
+-- Common grid-division options, in display order - matching the same
+-- plain "N" denominator convention tab_editor.lua's own Duration field
+-- uses (config.grid_denominator stores whichever number was picked).
+local GRID_DENOMINATORS = { 1, 2, 4, 8, 16, 32, 64, 128 }
+
+local function grid_denominator_label(d)
+  return d == 1 and "1" or ("1/" .. d)
+end
+
+-- Draws the grid-line overlay's own settings row (Show Grid Lines, the
+-- grid-division combo, and the straight/triplet toggle) - a second row
+-- directly below M.draw_mode_toggles' own, per the layout the grid
+-- overlay feature was specifically asked for. Kept as a separate function
+-- (not folded into draw_mode_toggles) since it's a distinct feature with
+-- its own three controls, not one more toggle sharing that row.
+--
+-- All three fields are global display preferences, not per-take
+-- properties (see config.lua's own header on grid_enabled) - saved via
+-- save_persisted only, same as show_note_names, never save_for_take.
+-- Like show_note_names/edit_mode, none of this needs a "please recompute"
+-- return: the grid overlay is drawn live, straight off these config
+-- fields, by grid_overlay.lua/main.lua - never baked into cached_render_
+-- model, and (deliberately) never read by pdf_export.lua's print pass at
+-- all - see grid_overlay.lua's own header for why gridlines never print.
+function M.draw_grid_options(ctx, cfg)
+  local changed = false
+
+  local ge_changed, new_grid_enabled = reaper.ImGui_Checkbox(ctx, "Show Grid Lines", cfg.grid_enabled)
+  if ge_changed then
+    cfg.grid_enabled = new_grid_enabled
+    changed = true
+  end
+
+  reaper.ImGui_SameLine(ctx)
+
+  reaper.ImGui_SetNextItemWidth(ctx, 70)
+  local current_denom = cfg.grid_denominator or 16
+  if reaper.ImGui_BeginCombo(ctx, "Grid", grid_denominator_label(current_denom)) then
+    for _, d in ipairs(GRID_DENOMINATORS) do
+      local is_selected = (d == current_denom)
+      if reaper.ImGui_Selectable(ctx, grid_denominator_label(d), is_selected) then
+        cfg.grid_denominator = d
+        changed = true
+      end
+    end
+    reaper.ImGui_EndCombo(ctx)
+  end
+
+  reaper.ImGui_SameLine(ctx)
+
+  local tr_changed, new_triplet = reaper.ImGui_Checkbox(ctx, "Triplet", cfg.grid_triplet or false)
+  if tr_changed then
+    cfg.grid_triplet = new_triplet
+    changed = true
+  end
+
+  if changed then
+    M.save_persisted(cfg)
+  end
 end
 
 return M

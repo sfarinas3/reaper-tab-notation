@@ -45,7 +45,7 @@
 ; produces dist\ReaperTabNotation-Setup.exe.
 
 #define MyAppName "Guitar Tab/Notation Viewer"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.3"
 #define MyAppPublisher "Guitar Tab/Notation Viewer"
 
 [Setup]

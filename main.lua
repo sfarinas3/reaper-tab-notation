@@ -115,6 +115,8 @@ local tab_editor = require('tab_editor')
 local measure_correction = require('measure_correction')
 local color_util = require('color_util')
 local pdf_export = require('pdf_export')
+local grid_overlay = require('grid_overlay')
+local transport_shortcuts = require('transport_shortcuts')
 
 ui_chrome.load_persisted(config)
 
@@ -128,6 +130,7 @@ local COLOR_PLAYHEAD = 0xFF6020FF
 local MIN_SYSTEM_WIDTH = 150 -- floor for a transiently tiny/collapsing window, so wrapping never degenerates
 local WINDOW_CHROME_RESERVE = 40 -- fixed estimate for window padding + a possible vertical scrollbar
 local BOTTOM_MARGIN = 10 -- px reserved below the last system, so the bottom tab string's fret-number text doesn't clip against the window's bottom edge
+local GRID_LINE_ALPHA = 0x30 -- low alpha (out of 0xFF) for grid_overlay.lua's faint gridlines - see color_util.faint
 
 local ctx = reaper.ImGui_CreateContext(SCRIPT_TITLE)
 
@@ -209,6 +212,8 @@ local function do_export(filepath)
 end
 
 local function main()
+  transport_shortcuts.handle(ctx)
+
   local take = midi_read.get_active_take()
   local hash = midi_read.get_notes_hash(take)
 
@@ -298,7 +303,8 @@ local function main()
     -- valid take/measure_ticks, but the other two have nothing to guard).
     measure_correction.draw_panel(ctx, take, cached_assigned_events, cached_measure_ticks, cached_measure_info)
     ui_chrome.draw_print_export(ctx, config, do_export)
-    ui_chrome.draw_mode_toggles(ctx, config, take)
+    local _, wide_leap_toggled = ui_chrome.draw_mode_toggles(ctx, config, take)
+    ui_chrome.draw_grid_options(ctx, config)
     -- Still gives both modules' popups their BeginPopup/EndPopup pair even
     -- on this early return - if a popup was left open when the take
     -- disappeared (e.g. the user deselected the item mid-edit, or
@@ -314,7 +320,7 @@ local function main()
     -- entirely whenever note_editor's already returned true.
     local note_editor_changed = note_editor.end_frame(ctx, take)
     local tab_editor_changed = tab_editor.end_frame(ctx)
-    pending_recompute = note_editor_changed or tab_editor_changed
+    pending_recompute = note_editor_changed or tab_editor_changed or wide_leap_toggled
     return
   end
 
@@ -334,7 +340,8 @@ local function main()
     -- even though there's nothing renderable this frame.
     measure_correction.draw_panel(ctx, take, cached_assigned_events, cached_measure_ticks, cached_measure_info)
     ui_chrome.draw_print_export(ctx, config, do_export)
-    ui_chrome.draw_mode_toggles(ctx, config, take)
+    local _, wide_leap_toggled = ui_chrome.draw_mode_toggles(ctx, config, take)
+    ui_chrome.draw_grid_options(ctx, config)
     note_editor.begin_frame(ctx)
     tab_editor.begin_frame(ctx, take, cached_assigned_events)
     -- Both called unconditionally (never short-circuited via `or`) - each
@@ -343,7 +350,7 @@ local function main()
     -- entirely whenever note_editor's already returned true.
     local note_editor_changed = note_editor.end_frame(ctx, take)
     local tab_editor_changed = tab_editor.end_frame(ctx)
-    pending_recompute = note_editor_changed or tab_editor_changed
+    pending_recompute = note_editor_changed or tab_editor_changed or wide_leap_toggled
     return
   end
 
@@ -364,176 +371,210 @@ local function main()
   -- which module's check_system runs on a staff click) is only known once
   -- this returns, well before that loop actually runs.
   ui_chrome.draw_print_export(ctx, config, do_export)
-  local edit_mode = ui_chrome.draw_mode_toggles(ctx, config, take)
+  local edit_mode, wide_leap_toggled = ui_chrome.draw_mode_toggles(ctx, config, take)
+  ui_chrome.draw_grid_options(ctx, config)
 
-  -- No separate ImGui_Text block needed here for the guitar/tuning/key
-  -- summary: score_render.draw_header (below) already draws it on the
-  -- canvas, and that call runs in this SAME live-view frame too, not just
-  -- pdf_export.lua's print pass - see that file's header. It lands right
-  -- here, below the whole settings menu (Score Settings, Measure
-  -- Correction Tool, Print & Export, the mode toggles), since that's
-  -- exactly where origin_y (the score canvas's own top-left) falls once
-  -- every widget above it has been drawn.
-  local draw_list = reaper.ImGui_GetWindowDrawList(ctx)
-  local origin_x, origin_y = reaper.ImGui_GetCursorScreenPos(ctx)
-  local avail_w, avail_h = reaper.ImGui_GetContentRegionAvail(ctx)
+  -- Everything below - the score header, every system, the grid overlay,
+  -- and the live playhead line - draws inside its own scrollable child
+  -- window, rather than the outer window ImGui_Begin opened. Before this,
+  -- the score was just more content in that SAME scrolling window, so
+  -- scrolling down through a long piece scrolled the settings menu above
+  -- it out of view along with everything else - pinning the whole settings
+  -- menu (Score Settings, Measure Correction Tool, Print & Export, the
+  -- mode toggles, grid options) means it now needs its OWN separate
+  -- scrolling region below it instead. child_visible mirrors the outer
+  -- Begin/visible check right above main()'s own call in loop() - Dear
+  -- ImGui still requires EndChild unconditionally even when this returns
+  -- false (fully clipped/collapsed), same as End does for a real window.
+  local child_visible = reaper.ImGui_BeginChild(ctx, "score_scroll", 0, 0, 0, reaper.ImGui_WindowFlags_HorizontalScrollbar())
+  if child_visible then
+    local draw_list = reaper.ImGui_GetWindowDrawList(ctx)
 
-  -- Recomputed every frame (cheap) rather than cached, since the Colors
-  -- section can change config.color_fg/color_bg at any time - dim is the
-  -- shared "secondary ink" shade barlines/measure/tempo labels use, same
-  -- one draw_notation.lua/draw_tab.lua derive for their own staff lines/
-  -- ties/let-ring (see color_util.lua).
-  local color_dim = color_util.dim(config.color_fg, config.color_bg)
-  draw_notation.set_colors(config.color_fg, config.color_bg)
-  draw_tab.set_colors(config.color_fg, config.color_bg)
+    -- Recomputed every frame (cheap) rather than cached, since the Colors
+    -- section can change config.color_fg/color_bg at any time - dim is the
+    -- shared "secondary ink" shade barlines/measure/tempo labels use, same
+    -- one draw_notation.lua/draw_tab.lua derive for their own staff lines/
+    -- ties/let-ring (see color_util.lua).
+    local color_dim = color_util.dim(config.color_fg, config.color_bg)
+    draw_notation.set_colors(config.color_fg, config.color_bg)
+    draw_tab.set_colors(config.color_fg, config.color_bg)
 
-  -- Wrapping is a cheap post-process over the already-cached single-line
-  -- layout, redone every frame against the current panel width - this is
-  -- what makes resize/zoom "just work" with no separate cache-
-  -- invalidation trigger (see layout_engine.lua's header). Width comes
-  -- from the window's own frame size, NOT GetContentRegionAvail: that
-  -- shrinks whenever a vertical scrollbar is showing, which set up a
-  -- feedback loop - fewer systems fit -> shorter content -> scrollbar
-  -- disappears -> width grows back -> re-wraps into fewer/wider systems
-  -- -> taller again -> scrollbar reappears - visible as the whole score
-  -- jittering every frame. Window size doesn't change just because our
-  -- own content happens to need a scrollbar, so it breaks the loop.
-  -- WINDOW_CHROME_RESERVE is a fixed estimate for padding plus a
-  -- possible scrollbar, applied unconditionally so the width used for
-  -- wrapping never depends on whether one is actually visible this frame.
-  local window_w = reaper.ImGui_GetWindowSize(ctx)
-  local max_width = math.max(window_w - WINDOW_CHROME_RESERVE - config.layout.right_margin, MIN_SYSTEM_WIDTH)
-  local systems = layout_engine.wrap_into_systems(cached_render_model, cached_measure_ticks, max_width)
+    -- Wrapping is a cheap post-process over the already-cached single-line
+    -- layout, redone every frame against the current panel width - this is
+    -- what makes resize/zoom "just work" with no separate cache-
+    -- invalidation trigger (see layout_engine.lua's header). Width comes
+    -- from the CHILD window's own frame size, NOT GetContentRegionAvail:
+    -- that shrinks whenever a vertical scrollbar is showing, which set up a
+    -- feedback loop - fewer systems fit -> shorter content -> scrollbar
+    -- disappears -> width grows back -> re-wraps into fewer/wider systems
+    -- -> taller again -> scrollbar reappears - visible as the whole score
+    -- jittering every frame. Window size doesn't change just because our
+    -- own content happens to need a scrollbar, so it breaks the loop.
+    -- WINDOW_CHROME_RESERVE is a fixed estimate for padding plus a
+    -- possible scrollbar, applied unconditionally so the width used for
+    -- wrapping never depends on whether one is actually visible this frame.
+    local window_w = reaper.ImGui_GetWindowSize(ctx)
+    local max_width = math.max(window_w - WINDOW_CHROME_RESERVE - config.layout.right_margin, MIN_SYSTEM_WIDTH)
 
-  -- Score header (title/composer/arranger) and per-system vertical
-  -- geometry - shared with pdf_export.lua's print pass via score_render.
-  -- lua, see that file's header. geo.top_reserve has to be known before
-  -- the systems loop below (every system's own vertical position is
-  -- shifted down to make room); the header text itself is drawn after
-  -- (needs max_width, already computed above, for centering/right-
-  -- alignment - order makes no visual difference, nothing overlaps).
-  local geo = score_render.layout_geometry(ctx, config)
-  score_render.draw_header(ctx, draw_list, origin_x, origin_y, config, max_width, config.color_fg, color_dim)
+    local play_state = reaper.GetPlayState()
+    local is_playing = (play_state & 1) == 1
+    -- Playback position while playing, otherwise the edit cursor - so
+    -- clicking a gridline (grid_overlay.lua, which only moves the edit
+    -- cursor via SetEditCurPos) is immediately visible as this line jumping,
+    -- the same way REAPER's own ruler shows a moved edit cursor whether or
+    -- not the transport is running. Auto-scroll-into-view below still only
+    -- triggers during actual playback (see playhead_system_top_y) - a
+    -- manual click doesn't need the view yanked to where the user already
+    -- clicked.
+    local play_tick = reaper.MIDI_GetPPQPosFromProjTime(take,
+      is_playing and reaper.GetPlayPosition() or reaper.GetCursorPosition())
 
-  local play_state = reaper.GetPlayState()
-  local is_playing = (play_state & 1) == 1
-  local play_tick = is_playing and reaper.MIDI_GetPPQPosFromProjTime(take, reaper.GetPlayPosition()) or nil
-  local playhead_system_top_y = nil -- local (unscrolled) y, set if the playhead falls within a system this frame
+    local origin_x, origin_y = reaper.ImGui_GetCursorScreenPos(ctx)
+    local avail_w, avail_h = reaper.ImGui_GetContentRegionAvail(ctx)
 
-  local total_width = 0
+    local systems = layout_engine.wrap_into_systems(cached_render_model, cached_measure_ticks, max_width)
 
-  -- Fresh each frame (it's a stateful forward-pointer, see
-  -- notation_model.beat_ticks_lookup), but shared across every system in
-  -- this frame's loop rather than one per system - ticks are still
-  -- monotonically increasing across systems in order, so one pointer
-  -- walk covers the whole piece correctly and cheaply.
-  local beat_ticks_lookup = notation_model.beat_ticks_lookup(cached_measure_ticks, cached_measure_info)
+    -- Score header (title/composer/arranger) and per-system vertical
+    -- geometry - shared with pdf_export.lua's print pass via score_render.
+    -- lua, see that file's header. geo.top_reserve has to be known before
+    -- the systems loop below (every system's own vertical position is
+    -- shifted down to make room); the header text itself is drawn after
+    -- (needs max_width, already computed above, for centering/right-
+    -- alignment - order makes no visual difference, nothing overlaps).
+    local geo = score_render.layout_geometry(ctx, config)
+    score_render.draw_header(ctx, draw_list, origin_x, origin_y, config, max_width, config.color_fg, color_dim)
 
-  note_editor.begin_frame(ctx)
-  tab_editor.begin_frame(ctx, take, cached_assigned_events)
-  measure_correction.begin_frame(ctx)
+    local playhead_system_top_y = nil -- local (unscrolled) y, set if the playhead falls within a system this frame
 
-  for s = 1, #systems do
-    local system = systems[s]
-    local sys_top_local_y = geo.top_reserve + (s - 1) * geo.system_pitch
+    local total_width = 0
 
-    local notation_width, tab_width, bar_top, bar_bottom = score_render.draw_system(
-      ctx, draw_list, origin_x, origin_y, sys_top_local_y, config, geo,
-      system, s, #systems, cached_measure_info, beat_ticks_lookup, color_dim)
+    -- Fresh each frame (it's a stateful forward-pointer, see
+    -- notation_model.beat_ticks_lookup), but shared across every system in
+    -- this frame's loop rather than one per system - ticks are still
+    -- monotonically increasing across systems in order, so one pointer
+    -- walk covers the whole piece correctly and cheaply.
+    local beat_ticks_lookup = notation_model.beat_ticks_lookup(cached_measure_ticks, cached_measure_info)
 
-    -- tab_origin_y recomputed here (not returned by draw_system) just for
-    -- note_editor.lua's own hit-testing, which is live-view-only - same
-    -- formula draw_system uses internally.
-    local middle_c_y = origin_y + sys_top_local_y + geo.notation_above
-    local tab_origin_y = middle_c_y + geo.notation_below + config.layout.staff_gap
-    -- Mutually exclusive per click, not both running at once - View
-    -- Mode's click-to-correct popup (existing notes only) vs Edit Mode's
-    -- click-to-create/delete (see tab_editor.lua's header). Both
-    -- modules' begin_frame/end_frame still run unconditionally around
-    -- this loop either way, only this per-system hit-test call branches.
-    if edit_mode then
-      tab_editor.check_system(origin_x, tab_origin_y, system)
-    else
-      note_editor.check_system(origin_x, tab_origin_y, system.events)
-    end
-    measure_correction.check_system(origin_x, bar_top, bar_bottom, system)
+    note_editor.begin_frame(ctx)
+    tab_editor.begin_frame(ctx, take, cached_assigned_events)
+    measure_correction.begin_frame(ctx)
+    grid_overlay.begin_frame(ctx)
+    local color_grid_faint = color_util.faint(color_dim, GRID_LINE_ALPHA)
 
-    total_width = math.max(total_width, notation_width, tab_width)
+    for s = 1, #systems do
+      local system = systems[s]
+      local sys_top_local_y = geo.top_reserve + (s - 1) * geo.system_pitch
 
-    if play_tick and play_tick >= system.tick_lo and play_tick < system.tick_hi then
-      local playhead_x = origin_x + layout_engine.x_for_tick(system.events, play_tick)
-      reaper.ImGui_DrawList_AddLine(draw_list, playhead_x, bar_top, playhead_x, bar_bottom, COLOR_PLAYHEAD, 2.0)
-      playhead_system_top_y = sys_top_local_y
-    end
-  end
+      local notation_width, tab_width, bar_top, bar_bottom = score_render.draw_system(
+        ctx, draw_list, origin_x, origin_y, sys_top_local_y, config, geo,
+        system, s, #systems, cached_measure_info, beat_ticks_lookup, color_dim)
 
-  -- Both called unconditionally - see the early-return branches above for
-  -- why this can't be a short-circuited `note_editor.end_frame(...) or
-  -- tab_editor.end_frame(...)`.
-  local note_editor_changed = note_editor.end_frame(ctx, take)
-  local tab_editor_changed = tab_editor.end_frame(ctx)
-  pending_recompute = note_editor_changed or tab_editor_changed
-
-  local total_height = geo.top_reserve + (#systems * geo.system_pitch - config.layout.system_gap) + BOTTOM_MARGIN
-
-  -- Auto-scroll during playback now follows vertically (which system is
-  -- active), not horizontally - wrapping already keeps every system
-  -- within max_width, so there's rarely anything to scroll sideways to.
-  -- Unlike the single-line version's continuous horizontal pinning, this
-  -- only scrolls when the active system isn't already fully in view -
-  -- jumping straight to a fixed offset every frame would feel wrong for
-  -- something as coarse-grained as "which line," rather than the smooth
-  -- note-by-note motion horizontal follow had.
-  if playhead_system_top_y then
-    local current_scroll_y = reaper.ImGui_GetScrollY(ctx)
-    local system_bottom_y = playhead_system_top_y + geo.system_pitch
-
-    if geo.system_pitch > avail_h then
-      -- The system itself is taller than the visible area - trying to
-      -- fit both its top and bottom on screen is impossible, and the two
-      -- branches below would otherwise fight each other every frame
-      -- (satisfying "top visible" pushes the bottom out of view and vice
-      -- versa), which is exactly what showed up as jitter/vibration
-      -- during playback. Just pin the top into view instead.
-      if playhead_system_top_y ~= current_scroll_y then
-        reaper.ImGui_SetScrollY(ctx, playhead_system_top_y)
+      -- tab_origin_y recomputed here (not returned by draw_system) just for
+      -- note_editor.lua's own hit-testing, which is live-view-only - same
+      -- formula draw_system uses internally.
+      local middle_c_y = origin_y + sys_top_local_y + geo.notation_above
+      local tab_origin_y = middle_c_y + geo.notation_below + config.layout.staff_gap
+      -- Mutually exclusive per click, not both running at once - View
+      -- Mode's click-to-correct popup (existing notes only) vs Edit Mode's
+      -- click-to-create/delete (see tab_editor.lua's header). Both
+      -- modules' begin_frame/end_frame still run unconditionally around
+      -- this loop either way, only this per-system hit-test call branches.
+      if edit_mode then
+        tab_editor.check_system(origin_x, tab_origin_y, system)
+      else
+        note_editor.check_system(origin_x, tab_origin_y, system.events)
       end
-    elseif playhead_system_top_y < current_scroll_y then
-      reaper.ImGui_SetScrollY(ctx, playhead_system_top_y)
-    elseif system_bottom_y > current_scroll_y + avail_h then
-      reaper.ImGui_SetScrollY(ctx, system_bottom_y - avail_h)
-    end
-  end
+      measure_correction.check_system(origin_x, bar_top, bar_bottom, system)
 
-  -- Reserve the space we just drew into via the draw list so the window's
-  -- own layout/scrolling accounts for it (the draw list itself doesn't
-  -- advance ImGui's cursor). InvisibleButton, not Dummy - a real, once-
-  -- live bug: Dummy reserves layout space but claims no mouse interaction,
-  -- so a click-drag anywhere over the score (e.g. Edit Mode's drag-to-
-  -- select rectangle - see tab_editor.lua's header) fell through to
-  -- REAPER's own docker/window chrome with nothing in ImGui claiming it,
-  -- which read the drag as "move this pane" instead. An InvisibleButton
-  -- covering the exact same rect makes Dear ImGui treat this area as a
-  -- real interactive item, which stops that fallthrough - this app's own
-  -- click/drag handling (tab_editor.lua/note_editor.lua/measure_
-  -- correction.lua) still reads raw global mouse state directly rather
-  -- than this button's own pressed/hovered result, so nothing about their
-  -- own logic needed to change, only what claims the region.
-  --
-  -- Sized to at least avail_w/avail_h (the window's own remaining content
-  -- region, captured before any of the above was drawn), not just total_
-  -- width/total_height (the score's own tight content bounding box) - a
-  -- second real bug this surfaced: whenever the window is wider or taller
-  -- than the score actually needs (a short piece, or a window the user
-  -- resized larger), the leftover blank margin past total_width/height was
-  -- claimed by nothing at all, so a drag-select started there still fell
-  -- through to REAPER's docker exactly like before this button existed.
-  -- Taking the max of each pair keeps the OTHER direction's existing
-  -- behavior unchanged - when the score is actually the larger of the two
-  -- (the normal case, needing to scroll), this is identical to before.
-  local canvas_w = math.max(total_width, avail_w)
-  local canvas_h = math.max(total_height, avail_h)
-  reaper.ImGui_InvisibleButton(ctx, "score_canvas", canvas_w, canvas_h)
+      if config.grid_enabled then
+        -- Editing wins any conflict over the same click - see grid_overlay.
+        -- lua's own header for why this is checked here (positionally,
+        -- ahead of time) rather than deferred to whichever editor's own
+        -- click/drag timing resolves later.
+        local consumed = edit_mode and tab_editor.would_hit_editable(origin_x, tab_origin_y, system)
+          or (not edit_mode and note_editor.would_hit_note(origin_x, tab_origin_y, system.events))
+        grid_overlay.draw_and_check(ctx, draw_list, origin_x, take, system, bar_top, bar_bottom,
+          config, color_grid_faint, consumed)
+      end
+
+      total_width = math.max(total_width, notation_width, tab_width)
+
+      if play_tick and play_tick >= system.tick_lo and play_tick < system.tick_hi then
+        local playhead_x = origin_x + layout_engine.x_for_tick(system.events, play_tick)
+        reaper.ImGui_DrawList_AddLine(draw_list, playhead_x, bar_top, playhead_x, bar_bottom, COLOR_PLAYHEAD, 2.0)
+        playhead_system_top_y = sys_top_local_y
+      end
+    end
+
+    -- Both called unconditionally - see the early-return branches above for
+    -- why this can't be a short-circuited `note_editor.end_frame(...) or
+    -- tab_editor.end_frame(...)`.
+    local note_editor_changed = note_editor.end_frame(ctx, take)
+    local tab_editor_changed = tab_editor.end_frame(ctx)
+    pending_recompute = note_editor_changed or tab_editor_changed or wide_leap_toggled
+
+    local total_height = geo.top_reserve + (#systems * geo.system_pitch - config.layout.system_gap) + BOTTOM_MARGIN
+
+    -- Auto-scroll during playback now follows vertically (which system is
+    -- active), not horizontally - wrapping already keeps every system
+    -- within max_width, so there's rarely anything to scroll sideways to.
+    -- Unlike the single-line version's continuous horizontal pinning, this
+    -- only scrolls when the active system isn't already fully in view -
+    -- jumping straight to a fixed offset every frame would feel wrong for
+    -- something as coarse-grained as "which line," rather than the smooth
+    -- note-by-note motion horizontal follow had.
+    if is_playing and playhead_system_top_y then
+      local current_scroll_y = reaper.ImGui_GetScrollY(ctx)
+      local system_bottom_y = playhead_system_top_y + geo.system_pitch
+
+      if geo.system_pitch > avail_h then
+        -- The system itself is taller than the visible area - trying to
+        -- fit both its top and bottom on screen is impossible, and the two
+        -- branches below would otherwise fight each other every frame
+        -- (satisfying "top visible" pushes the bottom out of view and vice
+        -- versa), which is exactly what showed up as jitter/vibration
+        -- during playback. Just pin the top into view instead.
+        if playhead_system_top_y ~= current_scroll_y then
+          reaper.ImGui_SetScrollY(ctx, playhead_system_top_y)
+        end
+      elseif playhead_system_top_y < current_scroll_y then
+        reaper.ImGui_SetScrollY(ctx, playhead_system_top_y)
+      elseif system_bottom_y > current_scroll_y + avail_h then
+        reaper.ImGui_SetScrollY(ctx, system_bottom_y - avail_h)
+      end
+    end
+
+    -- Reserve the space we just drew into via the draw list so the window's
+    -- own layout/scrolling accounts for it (the draw list itself doesn't
+    -- advance ImGui's cursor). InvisibleButton, not Dummy - a real, once-
+    -- live bug: Dummy reserves layout space but claims no mouse interaction,
+    -- so a click-drag anywhere over the score (e.g. Edit Mode's drag-to-
+    -- select rectangle - see tab_editor.lua's header) fell through to
+    -- REAPER's own docker/window chrome with nothing in ImGui claiming it,
+    -- which read the drag as "move this pane" instead. An InvisibleButton
+    -- covering the exact same rect makes Dear ImGui treat this area as a
+    -- real interactive item, which stops that fallthrough - this app's own
+    -- click/drag handling (tab_editor.lua/note_editor.lua/measure_
+    -- correction.lua) still reads raw global mouse state directly rather
+    -- than this button's own pressed/hovered result, so nothing about their
+    -- own logic needed to change, only what claims the region.
+    --
+    -- Sized to at least avail_w/avail_h (the window's own remaining content
+    -- region, captured before any of the above was drawn), not just total_
+    -- width/total_height (the score's own tight content bounding box) - a
+    -- second real bug this surfaced: whenever the window is wider or taller
+    -- than the score actually needs (a short piece, or a window the user
+    -- resized larger), the leftover blank margin past total_width/height was
+    -- claimed by nothing at all, so a drag-select started there still fell
+    -- through to REAPER's docker exactly like before this button existed.
+    -- Taking the max of each pair keeps the OTHER direction's existing
+    -- behavior unchanged - when the score is actually the larger of the two
+    -- (the normal case, needing to scroll), this is identical to before.
+    local canvas_w = math.max(total_width, avail_w)
+    local canvas_h = math.max(total_height, avail_h)
+    reaper.ImGui_InvisibleButton(ctx, "score_canvas", canvas_w, canvas_h)
+  end
+  reaper.ImGui_EndChild(ctx)
 end
 
 local WINDOW_FLAGS = reaper.ImGui_WindowFlags_NoCollapse() | reaper.ImGui_WindowFlags_HorizontalScrollbar()

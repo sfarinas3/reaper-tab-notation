@@ -6,7 +6,15 @@
 -- top of the tab staff - standard tab notation numbers strings this way),
 -- tuning[#tuning] is the lowest-pitched string (thickest). Adding strings
 -- for extended-range instruments appends to the end (a new lowest string)
--- rather than shifting existing string numbers.
+-- rather than shifting existing string numbers. This array index is this
+-- app's one INTERNAL string numbering, used unchanged for every
+-- instrument (note.string, a note's MIDI channel pin, config.tuning
+-- lookups) - it is NOT necessarily the number a user sees/types, though:
+-- Shamisen numbers its strings the opposite way from Guitar (lowest
+-- string = 1), so every user-facing string-number label or text field
+-- goes through notation_model.display_string_number to translate between
+-- this internal index and the instrument-appropriate display number - see
+-- that function's header.
 
 local M = {}
 
@@ -70,6 +78,21 @@ M.color_fg = 0xFFFFFFFF
 -- no per-take save.
 M.show_note_names = false
 
+-- Grid line overlay (main.lua/src/grid_overlay.lua) - faint vertical lines
+-- through both staves at a fixed rhythmic subdivision, click-to-seek in
+-- the gap between them (see grid_overlay.lua's own header). A global
+-- display preference like show_note_names above, not an instrument/tuning
+-- property, so it's only ever persisted via the global ExtState fallback,
+-- no per-take save - and, like the live playhead line, drawn only in the
+-- live view (main.lua), never by pdf_export.lua's print pass. grid_
+-- denominator is the same plain "N" duration convention tab_editor.lua's
+-- own Duration field uses (4 = quarter, 8 = eighth, ...); grid_triplet
+-- divides that value into a triplet the same way tab_editor.lua's own "T"
+-- duration suffix does.
+M.grid_enabled = true
+M.grid_denominator = 16
+M.grid_triplet = false
+
 -- PDF export scale (pdf_export.lua/ui_chrome.lua's "Print / Export"
 -- section): "app pixel units" (the same units config.layout's constants
 -- use) -> PDF points, applied uniformly to every position, notehead
@@ -97,6 +120,19 @@ M.edit_default_velocity = 100
 -- available on the target machine.
 M.jp_font_file = "C:\\Windows\\Fonts\\msgothic.ttc"
 M.jp_font_family = "MS Gothic"
+
+-- Master switch for the wide-pitch-leap/tap-run handling below
+-- (fret_heuristic.lua's wide_leap_cost, and its tap_position_change_weight
+-- substitution in position_weight_for) - OFF by default. With this off,
+-- the DP's transition cost is exactly the original minimum-hand-movement
+-- structure: uniform position_change_weight/string_change_weight, no
+-- same-string preference for a big interval jump. Turning it on restores
+-- the full three-rule djent/tapping behavior those weights document. A
+-- quick on/off toggle (ui_chrome.lua's M.draw_mode_toggles), not a
+-- per-take/ExtState-persisted setting - it's a style choice made per
+-- editing session, not a property of a specific take the way
+-- instrument/tuning are.
+M.wide_leap_enabled = false
 
 -- Hand-tuned cost weights for the fret-assignment DP (fret_heuristic.lua).
 -- No learned model at this scale - these are starting points, expected to
@@ -156,15 +192,6 @@ M.weights = {
 M.layout = {
   ppq_per_quarter = 960,  -- REAPER's MIDI API tick resolution (MIDI_GetNote positions)
 
-  -- Edit Mode (tab_editor.lua): fixed grid subdivision new notes snap to
-  -- when clicking an empty tab-staff position, in ticks - a 16th note at
-  -- this file's ppq_per_quarter (matches duration_classes' own "16th"
-  -- entry below). Also doubles as a newly-inserted note's default
-  -- duration, so consecutively-typed notes chain back-to-back with no
-  -- gap. Phase 2's drag-resize is the natural place a note's own length
-  -- and the click grid's snap granularity would need to become separate
-  -- knobs - Phase 1 doesn't need that distinction.
-  edit_grid_ticks = 240,
   min_gap = 6,            -- minimum pixels between adjacent events' rendered content
   left_margin = 90,       -- room for the clef (every system) + time signature (first system, and wherever it changes) + a clear gap before the first note
   right_margin = 24,

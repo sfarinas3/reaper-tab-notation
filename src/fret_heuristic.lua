@@ -49,6 +49,42 @@ local function candidates_for_note(note)
   return all_candidates_for_pitch(note.pitch)
 end
 
+-- Shamisen-only hard constraint: within one chord event, EVERY note - open
+-- or fretted, mixed or not - has to sit on a contiguous run of strings,
+-- with no completely silent string skipped in between (e.g. strings 1 and
+-- 3 sounding, string 2 not played at all, is never valid, regardless of
+-- whether 1/3 are open or fretted). A real shamisen player can't isolate
+-- two non-adjacent strings while leaving the one between them completely
+-- untouched, whether that's the fretting hand pinning two strings or the
+-- bachi striking two strings in one pass - an open note played higher up
+-- next to a fretted one is fine (fret height doesn't matter here), but
+-- the strings involved still have to be adjacent.
+--
+-- Guitar has no such constraint - checked by the only caller,
+-- generate_event_states, which skips this filter entirely outside
+-- config.instrument == "Shamisen".
+local function shamisen_chord_ok(state)
+  local used, strings = {}, {}
+  for i = 1, #state do
+    local assign = state[i]
+    if assign then
+      used[assign.string] = true
+      strings[#strings + 1] = assign.string
+    end
+  end
+  if #strings < 2 then return true end
+
+  local min_s, max_s = strings[1], strings[1]
+  for i = 2, #strings do
+    if strings[i] < min_s then min_s = strings[i] end
+    if strings[i] > max_s then max_s = strings[i] end
+  end
+  for s = min_s + 1, max_s - 1 do
+    if not used[s] then return false end
+  end
+  return true
+end
+
 -- All valid joint states for one chord-event: the cartesian product of each
 -- note's candidates, filtered to combinations that don't reuse a string.
 -- Each state is an array of length #event.notes; an entry is `false` (not
@@ -94,10 +130,19 @@ local function generate_event_states(event)
     states = new_states
   end
 
+  if config.instrument == "Shamisen" then
+    local filtered = {}
+    for _, s in ipairs(states) do
+      if shamisen_chord_ok(s) then filtered[#filtered + 1] = s end
+    end
+    states = filtered
+  end
+
   -- Every note in the chord conflicted on every string it could reach (rare,
-  -- only possible with a small string count or a dense chord) - fall back
-  -- to "everything unreachable" so the event still produces one state
-  -- instead of stalling the DP with zero candidates.
+  -- only possible with a small string count or a dense chord), OR (Shamisen
+  -- only) every surviving combination violated shamisen_chord_ok above -
+  -- fall back to "everything unreachable" so the event still produces one
+  -- state instead of stalling the DP with zero candidates.
   if #states == 0 then
     local empty = {}
     for i = 1, n do empty[i] = false end
@@ -194,10 +239,15 @@ local function assignment_pitch(assign)
 end
 
 -- Wide-pitch-leap handling - see config.lua's own comment on the
--- wide_leap_* weights for the three rules this implements and why.
+-- wide_leap_* weights for the three rules this implements and why. Gated
+-- on config.wide_leap_enabled (see that field's own header) - falls
+-- through to 0 (no leap handling at all) when off, which is what actually
+-- restores the original minimum-hand-movement cost structure; the weights
+-- themselves stay in config.lua either way, just unused while off.
 -- Scoped to single-note states only (a chord isn't a "leap" in this
 -- sense) - a chord transition falls through to 0 (unaffected).
 local function wide_leap_cost(prev_state, state)
+  if not config.wide_leap_enabled then return 0 end
   if #prev_state ~= 1 or #state ~= 1 then return 0 end
   local prev, cur = prev_state[1], state[1]
   if not prev or not cur then return 0 end
@@ -270,10 +320,12 @@ end
 -- choice, purely to set up the discount for whatever comes after -
 -- traced against a real riff where this exact thing was pulling an
 -- otherwise-correct note onto the wrong string. Single-note states
--- only, matching wide_leap_cost's own scope.
+-- only, matching wide_leap_cost's own scope. Also gated on config.
+-- wide_leap_enabled, same as wide_leap_cost - off restores the plain
+-- position_change_weight unconditionally, regardless of established_run.
 local function position_weight_for(prev_state, state, established_run)
   local w = config.weights
-  if established_run and #prev_state == 1 and #state == 1 and prev_state[1] and state[1]
+  if config.wide_leap_enabled and established_run and #prev_state == 1 and #state == 1 and prev_state[1] and state[1]
       and prev_state[1].string == state[1].string
       and (prev_state[1].fret > w.wide_leap_tap_fret_threshold or state[1].fret > w.wide_leap_tap_fret_threshold) then
     return w.tap_position_change_weight

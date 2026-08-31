@@ -258,7 +258,7 @@ end
 -- anchoring) treats it as just another label and needs no separate
 -- tied-note logic of its own.
 local function label_for(note)
-  local base = note.string and tostring(note.fret) or "x"
+  local base = note.string and notation_model.display_fret_label(config, note.fret) or "x"
   if note.tied_from_prev then
     return "(" .. base .. ")"
   end

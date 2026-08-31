@@ -453,6 +453,20 @@ function M.x_for_tick_from_boundaries(ticks, xs, tick)
   return xs[n]
 end
 
+-- x for an arbitrary tick within one wrap_into_systems system - the usual
+-- forward M.x_for_tick against that system's own events, falling back to
+-- M.x_for_tick_from_boundaries for a system with zero rendered events (an
+-- all-rest system, which has no events array to interpolate against but
+-- still has its own ticks/barline_x pair). Shared by every caller that
+-- needs a screen x for a tick that isn't necessarily a real note's own
+-- onset (tab_editor.lua's click-locating, grid_overlay.lua's gridlines).
+function M.x_for_tick_in_system(system, tick)
+  if #system.events > 0 then
+    return M.x_for_tick(system.events, tick)
+  end
+  return M.x_for_tick_from_boundaries(system.ticks, system.barline_x, tick)
+end
+
 -- Re-chunks render_model (M.compute()'s single-line output) into
 -- multiple systems (wrapped lines), each fitting within max_width,
 -- breaking only at measure boundaries per measure_ticks

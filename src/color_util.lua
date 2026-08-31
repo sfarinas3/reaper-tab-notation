@@ -24,4 +24,12 @@ function M.dim(fg, bg)
   return M.blend(fg, bg, 0.35)
 end
 
+-- Same RGB as color, alpha replaced outright - a true translucent overlay
+-- (grid_overlay.lua's gridlines) rather than M.blend's opaque-but-lighter
+-- mix: a gridline crossing a notehead/fret number should let it show
+-- through faintly, not fully paint over it with a flat color.
+function M.faint(color, alpha)
+  return (color & 0xFFFFFF00) | alpha
+end
+
 return M

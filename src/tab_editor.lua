@@ -41,16 +41,25 @@
 -- has nothing to default from, so it falls back to a quarter note (see
 -- previous_note_duration/M.end_frame's create-popup-open logic).
 --
--- Locating a click: layout_engine.lua's M.x_for_tick already gives a
--- correct tick->x (forward), but duration-class spacing isn't time-
--- proportional, so inverting it directly for an arbitrary click x would be
--- approximate at best. Instead this enumerates the fixed grid's candidate
--- ticks across the clicked system and reuses the existing, already-correct
--- forward function to find each one's x, picking whichever is closest to
--- the click - no new inverse math, no risk of it disagreeing with how
--- everything else on screen is actually positioned. This is only ever
--- used to snap where a NEW note's onset lands - its duration is a wholly
--- separate, typed value (see above), not tied to this grid at all.
+-- Locating a click (see next_create_tick/sequence_frontier): a click on
+-- empty space doesn't get to name an arbitrary tick at all. This app
+-- renders one shared rhythmic timeline (chords are simultaneous notes
+-- across strings, not independent per-string tracks - see notation_model.
+-- detect_rests' own header), so a click that landed wherever it pleased
+-- could leave an unaccounted-for gap between it and whatever was already
+-- there - one that only reads as silence because detect_rests happens to
+-- fill it in as a rest, exactly the kind of accidental extra-voice-looking
+-- gap that function had to be hardened against once already. Instead, a
+-- click on string_idx only ever resolves to one of: the tick of the chord
+-- you just placed (if string_idx is still free there - stacking another
+-- note onto it), the sequence frontier (the latest endppq among every
+-- note in the take - the natural next slot), or a measure boundary at or
+-- past that frontier (the one deliberate exception: starting fresh at the
+-- top of a later measure, skipping any silence in between as an ordinary
+-- rest). Whichever of those is pixel-closest to the click wins - layout_
+-- engine.lua's M.x_for_tick gives each candidate's real on-screen x, so
+-- there's no separate inverse math and no risk of disagreeing with how
+-- everything else on screen is actually positioned.
 --
 -- Vertical/horizontal click gates: note_editor.lua's existing-note radius
 -- hit-test is self-bounding (it only ever matches near a real drawn note),
@@ -61,7 +70,7 @@
 -- system including the notation staff above - a different, deliberately
 -- coarser gate for a different purpose), and the system's own barline_x
 -- range horizontally (plus a little slack), so a click in blank space past
--- a short last system doesn't silently snap to its last grid tick.
+-- a short last system doesn't register as a hit at all.
 --
 -- Collision handling is refuse-only, never truncate, for BOTH create and
 -- duration-edit: checked against RAW MIDI note spans (assigned_events'
@@ -219,6 +228,7 @@
 local config = require('config')
 local layout_engine = require('layout_engine')
 local midi_read = require('midi_read')
+local notation_model = require('notation_model')
 
 local M = {}
 
@@ -258,7 +268,15 @@ local FRET_TECHNIQUE_HELP =
   "  lt  legato + tap together\n" ..
   "  pm  palm mute - written at a muted velocity\n" ..
   "  ph  pinch harmonic - written at max velocity"
-local QUICK_ENTRY_TOOLTIP_CREATE =
+-- Shamisen's tsubo (fret/position) labels aren't consecutive integers -
+-- see notation_model.display_fret_label/parse_fret_label's header for the
+-- full mapping. Appended to the Fret/Tab Code tooltips below, only when
+-- config.instrument == "Shamisen", so Guitar's tooltips are unchanged.
+local SHAMISEN_FRET_LABEL_HELP =
+  "Shamisen fret labels: 0,1,2,3,#,4,5,6,7,8,9,b,10,11,12,13,1#,14,...\n" ..
+  "(each octave's 2 half-tone positions are marked #/b, not a number)."
+
+local QUICK_ENTRY_TOOLTIP_CREATE_BASE =
   "Tab Code: string.fret.duration\n" ..
   "e.g. 8.12.1/8+ = string 8, fret 12, eighth-note triplet\n" ..
   "e.g. 8.12l.1/4 = string 8, fret 12, quarter note, legato\n\n" ..
@@ -270,7 +288,7 @@ local QUICK_ENTRY_TOOLTIP_CREATE =
   "  -N/D       rest instead of a note, e.g. -1/4 (skips forward,\n" ..
   "             writes nothing)\n\n" ..
   "Overrides the String/Fret/Duration fields below when filled in."
-local QUICK_ENTRY_TOOLTIP_EDIT =
+local QUICK_ENTRY_TOOLTIP_EDIT_BASE =
   "Tab Code: string.fret.duration\n" ..
   "e.g. 8.12.1/8+ = string 8, fret 12, eighth-note triplet\n" ..
   "e.g. 8.12l.1/4 = string 8, fret 12, quarter note, legato\n\n" ..
@@ -289,8 +307,31 @@ local DURATION_TOOLTIP_EDIT =
   "N or N/D, e.g. 4, 1/4, 2, 3/8 (dotted quarter)\n" ..
   "Add T or + for a triplet, e.g. 8T\n" ..
   "Prefix with - for a rest, e.g. -1/4 (DELETES this note)"
-local FRET_TOOLTIP =
+local FRET_TOOLTIP_BASE =
   "Optional technique suffix, right after the number:\n" .. FRET_TECHNIQUE_HELP
+
+-- config.instrument can change at runtime (the Instrument dropdown), so
+-- these three are computed at draw time rather than fixed module-load
+-- constants like the others above - each just prepends SHAMISEN_FRET_
+-- LABEL_HELP when appropriate.
+local function fret_tooltip()
+  if config.instrument == "Shamisen" then
+    return SHAMISEN_FRET_LABEL_HELP .. "\n\n" .. FRET_TOOLTIP_BASE
+  end
+  return FRET_TOOLTIP_BASE
+end
+local function quick_entry_tooltip_create()
+  if config.instrument == "Shamisen" then
+    return SHAMISEN_FRET_LABEL_HELP .. "\n\n" .. QUICK_ENTRY_TOOLTIP_CREATE_BASE
+  end
+  return QUICK_ENTRY_TOOLTIP_CREATE_BASE
+end
+local function quick_entry_tooltip_edit()
+  if config.instrument == "Shamisen" then
+    return SHAMISEN_FRET_LABEL_HELP .. "\n\n" .. QUICK_ENTRY_TOOLTIP_EDIT_BASE
+  end
+  return QUICK_ENTRY_TOOLTIP_EDIT_BASE
+end
 
 local function round(v)
   return math.floor(v + 0.5)
@@ -366,13 +407,18 @@ end
 -- Parses a typed Fret field (classic or quick-entry's first segment) into
 -- fret, technique_id, velocity_override - or nil on an invalid number.
 -- Range-checking (0..config.max_fret) is the caller's job, same division
--- of labor parse_string_index/parse_duration_input already use.
+-- of labor parse_string_index/parse_duration_input already use. The
+-- numeric text (after suffix-stripping) goes through notation_model.
+-- parse_fret_label rather than a bare tonumber, since Shamisen's tsubo
+-- labels aren't consecutive integers ("#", "1b", etc. - see that
+-- function's header); it falls back to plain tonumber for Guitar, so
+-- Guitar entry is completely unaffected.
 local function parse_fret_input(buf)
   local trimmed = (buf or ""):match("^%s*(.-)%s*$")
   local numeric_text, technique_id, velocity_override = strip_technique_suffix(trimmed)
-  local fret = tonumber(numeric_text)
+  local fret = notation_model.parse_fret_label(config, numeric_text)
   if not fret then return nil end
-  return round(fret), technique_id, velocity_override
+  return fret, technique_id, velocity_override
 end
 
 -- Formats a fret number back into typed text for seeding a popup field,
@@ -380,7 +426,9 @@ end
 -- any) - the round-trip counterpart to parse_fret_input/
 -- strip_technique_suffix, so re-opening Edit on an already-tagged note
 -- shows e.g. "12l" instead of a bare "12" that would silently drop the
--- tag if left untouched and re-committed.
+-- tag if left untouched and re-committed. notation_model.display_fret_
+-- label (not a bare tostring) so a reopened Shamisen note shows its tsubo
+-- label ("1#", "10", ...) instead of the raw semitone fret number.
 local function format_fret_with_technique(fret, technique_id, vel)
   local suffix = ""
   if technique_id == GUITAR_TECHNIQUE_LEGATO_TAP then
@@ -394,7 +442,7 @@ local function format_fret_with_technique(fret, technique_id, vel)
   elseif vel and vel >= PINCH_HARMONIC_VELOCITY then
     suffix = "ph"
   end
-  return tostring(fret) .. suffix
+  return notation_model.display_fret_label(config, fret) .. suffix
 end
 
 -- Denominator (as typed, e.g. 4 for a quarter note) <-> ticks. Same
@@ -502,16 +550,25 @@ local function parse_duration_input(buf)
   return plain_ticks
 end
 
--- Parses a string-number field's typed text into a validated string index
--- (1..#config.tuning), or nil if it's missing/out of range. Shared by both
--- popups' commit functions - each one still reports its own status message
--- on failure, so this only does the parse/range-check, not the messaging.
+-- Parses a string-number field's typed text into a validated INTERNAL
+-- string index (1..#config.tuning), or nil if it's missing/out of range.
+-- What's actually TYPED is the instrument-appropriate DISPLAY number (see
+-- notation_model.display_string_number) - Shamisen's lowest string is
+-- typed as "1", not this app's own internal index for it - so the range
+-- check validates the typed value as-is (1..n either way) and only the
+-- RETURNED value gets converted to the internal index everything else in
+-- this file (config.tuning[...], MIDI_InsertNote/SetNote's channel param)
+-- expects. Both parse_quick_entry and each popup's own "String" field
+-- funnel through this one function, so the numbering fix only has to
+-- happen here. Shared by both popups' commit functions - each one still
+-- reports its own status message on failure, so this only does the
+-- parse/range-check/convert, not the messaging.
 local function parse_string_index(buf)
   local s = tonumber(buf)
   if not s then return nil end
   s = round(s)
   if s < 1 or s > #config.tuning then return nil end
-  return s
+  return notation_model.display_string_number(config, s)
 end
 
 -- Optional compact "string.fret.duration" entry, e.g. "8.12.1/8+" for
@@ -549,7 +606,8 @@ local function parse_quick_entry(buf)
   local fret, technique_id, velocity_override = parse_fret_input(fret_s)
   if not fret then return nil, nil, nil, nil, nil, "Enter a valid fret number." end
   if fret < 0 or fret > config.max_fret then
-    return nil, nil, nil, nil, nil, string.format("Fret must be between 0 and %d.", config.max_fret)
+    return nil, nil, nil, nil, nil, string.format(
+      "Fret must be between 0 and %s.", notation_model.display_fret_label(config, config.max_fret))
   end
 
   local duration_ticks = parse_duration_input(duration_s)
@@ -811,91 +869,83 @@ function M.begin_frame(ctx, take, assigned_events)
   selected_marks = {}
 end
 
--- Fixed-interval grid ticks strictly within [system.tick_lo,
--- system.tick_hi) - the general/empty-space snap candidates.
-local function grid_ticks_for_system(system)
-  local ticks = {}
-  local grid = config.layout.edit_grid_ticks
-  local lo, hi = system.tick_lo, system.tick_hi
-  if not lo or not hi or hi == math.huge or hi <= lo then return ticks end
-  local t = math.ceil(lo / grid) * grid
-  while t < hi do
-    ticks[#ticks + 1] = t
-    t = t + grid
-  end
-  return ticks
-end
+local x_for_tick_in_system = layout_engine.x_for_tick_in_system
 
--- The exact END tick of every existing note (any string) that falls
--- within [lo, hi) - offered as a HIGHER-PRIORITY snap target than the
--- fixed grid (see nearest_grid_tick) because a triplet (or any other
--- duration that doesn't land on the plain 16th-note grid - e.g. an 8T
--- eighth-triplet ends at a multiple of 320, not 240) has no clean landing
--- spot on the fixed grid at all. Priority, not just one-more-candidate-by-
--- raw-pixel-distance, matters here: a lone triplet note not yet part of a
--- complete, recognized tuplet group (see notation_model.detect_tuplets)
--- renders at an "irregular" interpolated width (layout_engine.width_for_
--- duration, between the 16th and 8th classes) that can visually sit
--- further from its own true end tick than a nearby fixed-grid point is -
--- competing on raw pixel-distance alone let that nearby-but-wrong fixed
--- tick win on anything but a near-pixel-perfect click, silently
--- reproducing the same stray-rest bug this was meant to fix.
-local function note_end_ticks_for_system(lo, hi)
-  local ticks = {}
-  for i = 1, #collision_events do
+-- Where a click is allowed to create the NEXT note, across the WHOLE
+-- piece (collision_events, not just this system) - Edit Mode enforces one
+-- sequential timeline rather than letting a click land anywhere: skipping
+-- ahead mid-measure would leave an unaccounted-for gap that only reads as
+-- silence because notation_model.detect_rests happens to fill it in -
+-- exactly the kind of accidental multi-voice-looking gap that function
+-- had to be hardened against once already (see its own header on the
+-- running-latest-end fix). Returns:
+--   last_tick - the temporally LAST existing event's own tick (nil if the
+--     take has no notes at all) - clicking an unused string here adds a
+--     note to the chord you just placed, not a new event.
+--   seq_end - the latest endppq among EVERY note in the take (nil if
+--     none) - the position immediately after everything placed so far,
+--     the natural "next" slot once the current chord is done.
+local function sequence_frontier()
+  local n = #collision_events
+  if n == 0 then return nil, nil end
+  local last_tick = collision_events[n].tick
+  local seq_end = nil
+  for i = 1, n do
     local notes = collision_events[i].notes
     for j = 1, #notes do
-      local e = notes[j].endppq
-      if e and e >= lo and e < hi then
-        ticks[#ticks + 1] = e
-      end
+      if not seq_end or notes[j].endppq > seq_end then seq_end = notes[j].endppq end
     end
   end
-  return ticks
+  return last_tick, seq_end
 end
 
--- x for an arbitrary tick within one system - reuses layout_engine's
--- existing forward tick->x, falling back to x_for_tick_from_boundaries for
--- a system with zero rendered events (an all-rest system), the same case
--- notation_model.detect_rests already has to handle the same way (see
--- layout_engine.lua's own comment on that function).
-local function x_for_tick_in_system(system, tick)
-  if #system.events > 0 then
-    return layout_engine.x_for_tick(system.events, tick)
+-- True if string_idx already has a note in the temporally-last event -
+-- gates whether sequence_frontier's last_tick is actually usable as a
+-- create target for THIS string, or whether that chord already used it.
+local function last_event_uses_string(string_idx)
+  local n = #collision_events
+  if n == 0 then return false end
+  local notes = collision_events[n].notes
+  for j = 1, #notes do
+    if notes[j].string == string_idx then return true end
   end
-  return layout_engine.x_for_tick_from_boundaries(system.ticks, system.barline_x, tick)
+  return false
 end
 
-local NOTE_END_SNAP_SLACK = 20 -- px - same value as CLICK_SLACK, reused for consistency
+-- The one valid tick a click on string_idx is allowed to create at within
+-- this system, or nil if none apply here (e.g. this whole system falls
+-- before the sequence frontier - already-composed material a click can no
+-- longer append to). Candidates: the current chord's own tick (last_tick,
+-- only if string_idx is free there - lets a second click add a note to
+-- the chord you just placed), the sequence frontier itself (seq_end -
+-- always the "next slot" once the current chord is done), and every
+-- measure boundary at or past the frontier (system.ticks) - the explicit
+-- exception for starting fresh at the top of a later measure, skipping
+-- any silence in between (detect_rests fills that in as ordinary rests,
+-- same as any other gap). No notes anywhere yet (seq_end nil) makes every
+-- boundary in the piece a valid start, covering the very first click on
+-- an empty take. Ties broken by whichever candidate the click landed
+-- closest to, in pixels.
+local function next_create_tick(system, click_x_local, string_idx)
+  local last_tick, seq_end = sequence_frontier()
 
--- Nearest grid tick to click_x_local (already relative to this system's
--- own origin_x), or nil if this system has no candidate grid ticks at all.
--- Checks note-end ticks FIRST, within a generous pixel tolerance
--- (NOTE_END_SNAP_SLACK) - see note_end_ticks_for_system's own comment for
--- why this needs to be a priority tier rather than just another candidate
--- in the same nearest-wins pool as the fixed grid. Falls back to the
--- fixed-grid pool (unchanged behavior) when no note-end is close enough.
-local function nearest_grid_tick(system, click_x_local)
-  local lo, hi = system.tick_lo, system.tick_hi
-  if lo and hi and hi ~= math.huge and hi > lo then
-    local note_ends = note_end_ticks_for_system(lo, hi)
-    local best_end_tick, best_end_dist = nil, nil
-    for _, t in ipairs(note_ends) do
-      local d = math.abs(x_for_tick_in_system(system, t) - click_x_local)
-      if not best_end_dist or d < best_end_dist then
-        best_end_dist = d
-        best_end_tick = t
-      end
-    end
-    if best_end_tick and best_end_dist <= NOTE_END_SNAP_SLACK then
-      return best_end_tick
+  local candidates = {}
+  if last_tick and not last_event_uses_string(string_idx) then
+    candidates[#candidates + 1] = last_tick
+  end
+  if seq_end then
+    candidates[#candidates + 1] = seq_end
+  end
+  for _, b in ipairs(system.ticks) do
+    if (not seq_end) or b >= seq_end then
+      candidates[#candidates + 1] = b
     end
   end
 
-  local ticks = grid_ticks_for_system(system)
-  if #ticks == 0 then return nil end
+  if #candidates == 0 then return nil end
+
   local best_tick, best_dist = nil, nil
-  for _, t in ipairs(ticks) do
+  for _, t in ipairs(candidates) do
     local d = math.abs(x_for_tick_in_system(system, t) - click_x_local)
     if not best_dist or d < best_dist then
       best_dist = d
@@ -903,6 +953,51 @@ local function nearest_grid_tick(system, click_x_local)
     end
   end
   return best_tick
+end
+
+-- Pure predicate - true if the CURRENT mouse position (this frame's
+-- mouse_x/mouse_y, captured in begin_frame regardless of click state) would
+-- match either of check_system's own hit-tests (existing-note radius or
+-- empty-grid-cell) for this system. Lets main.lua's grid_overlay.lua click-
+-- to-seek check "is there something to edit right here" without waiting for
+-- check_system's own click/drag-vs-click timing: that only resolves - and
+-- only updates best_existing/best_empty - on the RELEASE frame of a
+-- completed non-drag click (see M.begin_frame's header), which is too late
+-- for a seek that has to make its own call on the PRESS frame. Since both
+-- hit-tests are pure functions of mouse position, re-running them here
+-- immediately at press-time is safe: for a genuine click (not a drag) the
+-- mouse hasn't moved from where check_system will eventually test it either.
+function M.would_hit_editable(origin_x, tab_origin_y, system)
+  local line_height = config.layout.line_height
+  local n_strings = #config.tuning
+
+  for i = 1, #system.events do
+    local event = system.events[i]
+    local x = origin_x + event.x
+    for j = 1, #event.notes do
+      local note = event.notes[j]
+      if not note.tied_from_prev then
+        local string_idx = note.string or config.layout.x_notehead_string
+        local y = tab_origin_y + (string_idx - 1) * line_height
+        local dx, dy = mouse_x - x, mouse_y - y
+        if math.sqrt(dx * dx + dy * dy) <= HIT_RADIUS then return true end
+      end
+    end
+  end
+
+  local top = tab_origin_y
+  local bottom = tab_origin_y + (n_strings - 1) * line_height + line_height / 2
+  if mouse_y < top or mouse_y > bottom then return false end
+
+  local xs = system.barline_x
+  if #xs == 0 then return false end
+  local lo_x = origin_x + xs[1] - CLICK_SLACK
+  local hi_x = origin_x + xs[#xs] + CLICK_SLACK
+  if mouse_x < lo_x or mouse_x > hi_x then return false end
+
+  local string_idx = round((mouse_y - tab_origin_y) / line_height) + 1
+  string_idx = math.max(1, math.min(n_strings, string_idx))
+  return next_create_tick(system, mouse_x - origin_x, string_idx) ~= nil
 end
 
 -- Call once per system, right after that system's score_render.draw_system
@@ -989,8 +1084,13 @@ function M.check_system(origin_x, tab_origin_y, system)
   -- Empty-grid-cell hit-test (candidate for create) - gated on falling
   -- within THIS system's own staff rows/measure span, see header for why
   -- these explicit bounds are needed (unlike the self-bounding radius
-  -- test above).
-  local top = tab_origin_y - line_height / 2
+  -- test above). Top is tab_origin_y exactly, not half a line above it -
+  -- that upward slack used to reach into the staff gap above the tab
+  -- staff, which main.lua's grid_overlay.lua also treats as its own click-
+  -- to-seek surface (see that file's header); a seek click landing in the
+  -- shared sliver was ALSO read as "create a note on string 1 here," which
+  -- popped the Create Note popup open and ate every click after it.
+  local top = tab_origin_y
   local bottom = tab_origin_y + (n_strings - 1) * line_height + line_height / 2
   if mouse_y < top or mouse_y > bottom then return end
 
@@ -1003,7 +1103,7 @@ function M.check_system(origin_x, tab_origin_y, system)
   local string_idx = round((mouse_y - tab_origin_y) / line_height) + 1
   string_idx = math.max(1, math.min(n_strings, string_idx))
 
-  local tick = nearest_grid_tick(system, mouse_x - origin_x)
+  local tick = next_create_tick(system, mouse_x - origin_x, string_idx)
   if not tick then return end
 
   best_empty = { tick = round(tick), string_idx = string_idx }
@@ -1220,10 +1320,17 @@ local function notes_overlap(a, b)
   return a.startppq < b.endppq and b.startppq < a.endppq
 end
 
-local function try_move_selected_to_string(target_string)
-  if not target_string or target_string < 1 or target_string > #config.tuning then
+-- target_display is the typed/displayed string number (see
+-- notation_model.display_string_number) - converted to the internal index
+-- right after the range check, same pattern as parse_string_index, so
+-- every message below can keep showing target_display (what the user
+-- actually typed) while every real config.tuning/MIDI operation uses
+-- target_string (the internal index).
+local function try_move_selected_to_string(target_display)
+  if not target_display or target_display < 1 or target_display > #config.tuning then
     return false, string.format("String must be between 1 and %d.", #config.tuning)
   end
+  local target_string = notation_model.display_string_number(config, target_display)
 
   local doomed = gather_selected_notes()
   if #doomed == 0 then return false, "Nothing selected." end
@@ -1234,8 +1341,9 @@ local function try_move_selected_to_string(target_string)
     local fret = note.pitch - config.tuning[target_string] - config.capo
     if fret < 0 or fret > config.max_fret then
       return false, string.format(
-        "Can't move: the note at tick %d would need fret %d on string %d (must be 0-%d).",
-        note.startppq, fret, target_string, config.max_fret)
+        "Can't move: the note at tick %d would need fret %s on string %d (must be 0-%s).",
+        note.startppq, notation_model.display_fret_label(config, fret), target_display,
+        notation_model.display_fret_label(config, config.max_fret))
     end
     moves[#moves + 1] = note
   end
@@ -1260,7 +1368,7 @@ local function try_move_selected_to_string(target_string)
       if other.string == target_string and not doomed_idx[other.idx] then
         for _, note in ipairs(moves) do
           if notes_overlap(other, note) then
-            return false, string.format("Can't move: string %d already has a note during that time.", target_string)
+            return false, string.format("Can't move: string %d already has a note during that time.", target_display)
           end
         end
       end
@@ -1281,7 +1389,7 @@ local function try_move_selected_to_string(target_string)
   end
   reaper.GetSetMediaItemTakeInfo_String(target_take, midi_read.TECH_EXT_KEY, midi_read.serialize_technique_map(map), true)
   finalize_midi_write(target_take)
-  reaper.Undo_EndBlock(string.format("Move %d notes to string %d (tab/notation viewer)", #moves, target_string), UNDO_ALL)
+  reaper.Undo_EndBlock(string.format("Move %d notes to string %d (tab/notation viewer)", #moves, target_display), UNDO_ALL)
   technique_changed = true
 
   selected_notes = {}
@@ -1334,7 +1442,8 @@ local function commit_create(ctx)
       return
     end
     if fret < 0 or fret > config.max_fret then
-      create_status = string.format("Fret must be between 0 and %d.", config.max_fret)
+      create_status = string.format(
+        "Fret must be between 0 and %s.", notation_model.display_fret_label(config, config.max_fret))
       return
     end
 
@@ -1349,7 +1458,7 @@ local function commit_create(ctx)
   -- the fields themselves), so switching input modes mid-session never
   -- shows a stale value if the write below fails and the popup stays open.
   fret_input_buf = format_fret_with_technique(fret, technique_id, velocity_override)
-  create_string_buf = tostring(string_idx)
+  create_string_buf = tostring(notation_model.display_string_number(config, string_idx))
   create_duration_buf = denominator_for_ticks(duration_ticks)
 
   local start_tick = pending_create.tick
@@ -1451,7 +1560,7 @@ local function commit_edit(ctx)
     local next_note = next_note_after(original_tick)
     if next_note then
       pending_edit = { note = next_note }
-      edit_string_buf = tostring(next_note.string or config.layout.x_notehead_string)
+      edit_string_buf = tostring(notation_model.display_string_number(config, next_note.string or config.layout.x_notehead_string))
       edit_fret_buf = format_fret_with_technique(
         next_note.fret or 0, note_technique(target_take, next_note), next_note.vel)
       edit_duration_buf = denominator_for_ticks(next_note.endppq - next_note.startppq)
@@ -1492,7 +1601,8 @@ local function commit_edit(ctx)
       return
     end
     if fret < 0 or fret > config.max_fret then
-      edit_status = string.format("Fret must be between 0 and %d.", config.max_fret)
+      edit_status = string.format(
+        "Fret must be between 0 and %s.", notation_model.display_fret_label(config, config.max_fret))
       return
     end
 
@@ -1504,7 +1614,7 @@ local function commit_edit(ctx)
   end
 
   edit_fret_buf = format_fret_with_technique(fret, technique_id, velocity_override)
-  edit_string_buf = tostring(string_idx)
+  edit_string_buf = tostring(notation_model.display_string_number(config, string_idx))
   edit_duration_buf = denominator_for_ticks(duration_ticks)
 
   local new_end = note.startppq + duration_ticks
@@ -1549,7 +1659,7 @@ local function commit_edit(ctx)
   local next_note = next_note_after(note.startppq)
   if next_note then
     pending_edit = { note = next_note }
-    edit_string_buf = tostring(next_note.string or config.layout.x_notehead_string)
+    edit_string_buf = tostring(notation_model.display_string_number(config, next_note.string or config.layout.x_notehead_string))
     edit_fret_buf = format_fret_with_technique(
       next_note.fret or 0, note_technique(target_take, next_note), next_note.vel)
     edit_duration_buf = denominator_for_ticks(next_note.endppq - next_note.startppq)
@@ -1592,7 +1702,7 @@ local function draw_create_popup(ctx)
   local _, new_quick_text = reaper.ImGui_InputText(ctx, "Tab Code (string.fret.duration)", create_quick_buf)
   create_quick_buf = new_quick_text
   if reaper.ImGui_IsItemHovered(ctx) then
-    reaper.ImGui_SetTooltip(ctx, QUICK_ENTRY_TOOLTIP_CREATE)
+    reaper.ImGui_SetTooltip(ctx, quick_entry_tooltip_create())
   end
 
   reaper.ImGui_Separator(ctx)
@@ -1629,7 +1739,7 @@ local function draw_create_popup(ctx)
   local _, new_fret_text = reaper.ImGui_InputText(ctx, "Fret", fret_input_buf)
   fret_input_buf = new_fret_text
   if reaper.ImGui_IsItemHovered(ctx) then
-    reaper.ImGui_SetTooltip(ctx, FRET_TOOLTIP)
+    reaper.ImGui_SetTooltip(ctx, fret_tooltip())
   end
 
   -- No CharsDecimal here (unlike Fret, above) - a trailing T/t (e.g. "8T"
@@ -1697,7 +1807,7 @@ local function draw_edit_popup(ctx)
   local _, new_quick_text = reaper.ImGui_InputText(ctx, "Tab Code (string.fret.duration)", edit_quick_buf)
   edit_quick_buf = new_quick_text
   if reaper.ImGui_IsItemHovered(ctx) then
-    reaper.ImGui_SetTooltip(ctx, QUICK_ENTRY_TOOLTIP_EDIT)
+    reaper.ImGui_SetTooltip(ctx, quick_entry_tooltip_edit())
   end
 
   reaper.ImGui_Separator(ctx)
@@ -1722,7 +1832,7 @@ local function draw_edit_popup(ctx)
   local _, new_fret_text = reaper.ImGui_InputText(ctx, "Fret", edit_fret_buf)
   edit_fret_buf = new_fret_text
   if reaper.ImGui_IsItemHovered(ctx) then
-    reaper.ImGui_SetTooltip(ctx, FRET_TOOLTIP)
+    reaper.ImGui_SetTooltip(ctx, fret_tooltip())
   end
 
   local _, new_text = reaper.ImGui_InputText(ctx, "Duration (N, N/D, -N/D rest)", edit_duration_buf)
@@ -1776,8 +1886,8 @@ local function draw_move_popup(ctx)
   move_string_buf = new_text
 
   local function commit_move()
-    local target_string = tonumber(move_string_buf)
-    local ok, err = try_move_selected_to_string(target_string and round(target_string) or nil)
+    local target_display = tonumber(move_string_buf)
+    local ok, err = try_move_selected_to_string(target_display and round(target_display) or nil)
     if ok then
       move_status = nil
       reaper.ImGui_CloseCurrentPopup(ctx)
@@ -1818,7 +1928,7 @@ function M.end_frame(ctx)
     pending_edit = { note = best_existing.note }
     pending_create = nil
     edit_status = nil
-    edit_string_buf = tostring(best_existing.note.string or config.layout.x_notehead_string)
+    edit_string_buf = tostring(notation_model.display_string_number(config, best_existing.note.string or config.layout.x_notehead_string))
     edit_fret_buf = format_fret_with_technique(
       best_existing.note.fret or 0, note_technique(target_take, best_existing.note), best_existing.note.vel)
     edit_duration_buf = denominator_for_ticks(best_existing.note.endppq - best_existing.note.startppq)
@@ -1832,7 +1942,7 @@ function M.end_frame(ctx)
     pending_create = { tick = best_empty.tick, string_idx = best_empty.string_idx }
     pending_edit = nil
     create_status = nil
-    create_string_buf = tostring(best_empty.string_idx)
+    create_string_buf = tostring(notation_model.display_string_number(config, best_empty.string_idx))
     fret_input_buf = ""
     create_duration_buf = denominator_for_ticks(previous_note_duration(best_empty.tick))
     create_quick_buf = ""
@@ -1881,7 +1991,7 @@ function M.end_frame(ctx)
       -- reasonable starting guess, not a source of truth) so the field
       -- isn't just a blank "1" every time.
       local seed = gather_selected_notes()[1]
-      move_string_buf = tostring((seed and seed.string) or 1)
+      move_string_buf = tostring(notation_model.display_string_number(config, (seed and seed.string) or 1))
       move_status = nil
       focus_move_input = true
       open_move_popup = true
