@@ -41,7 +41,16 @@ local notation_model = require('notation_model')
 
 local M = {}
 
-local HIT_RADIUS = 8 -- px around a fret-number/x's drawn position that counts as a click
+-- Base (unzoomed) value - see hit_radius() below, which every actual hit-
+-- test in this file reads. Magnification (config.zoom) has to scale this
+-- too, not just the note/staff spacing it already scales via config.
+-- layout: at 2x zoom a note is drawn twice as far from its neighbors, so a
+-- FIXED click radius would effectively tighten (harder to click); at 0.5x
+-- zoom the same fixed radius would effectively loosen (too easy to hit the
+-- wrong note). A function rather than a plain local so it always reflects
+-- the CURRENT zoom, read fresh on every click check.
+local HIT_RADIUS_BASE = 8 -- px around a fret-number/x's drawn position that counts as a click
+local function hit_radius() return HIT_RADIUS_BASE * (config.zoom or 1.0) end
 local POPUP_ID = "note_editor_popup"
 local UNDO_ALL = -1 -- Undo_EndBlock's extraflags: -1 = all undo-state flags, the standard idiom
 
@@ -92,7 +101,7 @@ function M.would_hit_note(origin_x, tab_origin_y, events)
         local string_idx = note.string or config.layout.x_notehead_string
         local y = tab_origin_y + (string_idx - 1) * config.layout.line_height
         local dx, dy = mouse_x - x, mouse_y - y
-        if math.sqrt(dx * dx + dy * dy) <= HIT_RADIUS then return true end
+        if math.sqrt(dx * dx + dy * dy) <= hit_radius() then return true end
       end
     end
   end
@@ -116,7 +125,7 @@ function M.check_system(origin_x, tab_origin_y, events)
         local y = tab_origin_y + (string_idx - 1) * line_height
         local dx, dy = mouse_x - x, mouse_y - y
         local dist = math.sqrt(dx * dx + dy * dy)
-        if dist <= HIT_RADIUS and (not best or dist < best.dist) then
+        if dist <= hit_radius() and (not best or dist < best.dist) then
           best = { note = note, dist = dist }
         end
       end

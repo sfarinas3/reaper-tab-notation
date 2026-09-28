@@ -282,6 +282,7 @@ local function main()
       -- result rather than recomputed every frame.
       cached_render_model = layout_engine.compute(assigned_events, {
         measure_width = draw_tab.make_measurer(ctx),
+        measure_start_buffer = draw_tab.measure_start_buffer(ctx),
         beat_ticks_lookup = notation_model.beat_ticks_lookup(cached_measure_ticks, cached_measure_info),
         measure_ticks = cached_measure_ticks,
         tuplet_lookup = tuplet_lookup,
@@ -305,6 +306,7 @@ local function main()
     ui_chrome.draw_print_export(ctx, config, do_export)
     local _, wide_leap_toggled = ui_chrome.draw_mode_toggles(ctx, config, take)
     ui_chrome.draw_grid_options(ctx, config)
+    local zoom_changed = ui_chrome.draw_zoom_control(ctx, config)
     -- Still gives both modules' popups their BeginPopup/EndPopup pair even
     -- on this early return - if a popup was left open when the take
     -- disappeared (e.g. the user deselected the item mid-edit, or
@@ -320,7 +322,7 @@ local function main()
     -- entirely whenever note_editor's already returned true.
     local note_editor_changed = note_editor.end_frame(ctx, take)
     local tab_editor_changed = tab_editor.end_frame(ctx)
-    pending_recompute = note_editor_changed or tab_editor_changed or wide_leap_toggled
+    pending_recompute = note_editor_changed or tab_editor_changed or wide_leap_toggled or zoom_changed
     return
   end
 
@@ -342,6 +344,7 @@ local function main()
     ui_chrome.draw_print_export(ctx, config, do_export)
     local _, wide_leap_toggled = ui_chrome.draw_mode_toggles(ctx, config, take)
     ui_chrome.draw_grid_options(ctx, config)
+    local zoom_changed = ui_chrome.draw_zoom_control(ctx, config)
     note_editor.begin_frame(ctx)
     tab_editor.begin_frame(ctx, take, cached_assigned_events)
     -- Both called unconditionally (never short-circuited via `or`) - each
@@ -350,7 +353,7 @@ local function main()
     -- entirely whenever note_editor's already returned true.
     local note_editor_changed = note_editor.end_frame(ctx, take)
     local tab_editor_changed = tab_editor.end_frame(ctx)
-    pending_recompute = note_editor_changed or tab_editor_changed or wide_leap_toggled
+    pending_recompute = note_editor_changed or tab_editor_changed or wide_leap_toggled or zoom_changed
     return
   end
 
@@ -373,6 +376,7 @@ local function main()
   ui_chrome.draw_print_export(ctx, config, do_export)
   local edit_mode, wide_leap_toggled = ui_chrome.draw_mode_toggles(ctx, config, take)
   ui_chrome.draw_grid_options(ctx, config)
+  local zoom_changed = ui_chrome.draw_zoom_control(ctx, config)
 
   -- Everything below - the score header, every system, the grid overlay,
   -- and the live playhead line - draws inside its own scrollable child
@@ -388,6 +392,24 @@ local function main()
   -- false (fully clipped/collapsed), same as End does for a real window.
   local child_visible = reaper.ImGui_BeginChild(ctx, "score_scroll", 0, 0, 0, reaper.ImGui_WindowFlags_HorizontalScrollbar())
   if child_visible then
+    -- Magnification (config.lua's cfg.zoom, ui_chrome.lua's Zoom slider):
+    -- scales TEXT specifically - config.layout's own pixel constants
+    -- (scaled by config.apply_zoom whenever the slider moves) already cover
+    -- every shape/spacing measurement everywhere else in this staff, but a
+    -- font has no per-call "pixel size" of its own for that mechanism to
+    -- reach. This build's ReaImGui has no ImGui_SetWindowFontScale (Dear
+    -- ImGui removed the old per-window font-scale API); PushFont's third
+    -- argument is now the actual size to render at, so pushing the current
+    -- font back onto itself at base_font_size * zoom has the same effect,
+    -- scoped to just this child (the score/tab content) via the matching
+    -- PopFont right before EndChild below - the pinned settings panel above
+    -- stays at its own normal reading size regardless of zoom. Affects
+    -- reaper.ImGui_CalcTextSize the same way it affects what's actually
+    -- drawn, so every layout measurement that reads a label's width (draw_
+    -- tab.lua's make_measurer, in particular) stays correct at any zoom
+    -- level too.
+    local base_font_size = reaper.ImGui_GetFontSize(ctx)
+    reaper.ImGui_PushFont(ctx, nil, base_font_size * (config.zoom or 1.0))
     local draw_list = reaper.ImGui_GetWindowDrawList(ctx)
 
     -- Recomputed every frame (cheap) rather than cached, since the Colors
@@ -480,7 +502,7 @@ local function main()
       -- modules' begin_frame/end_frame still run unconditionally around
       -- this loop either way, only this per-system hit-test call branches.
       if edit_mode then
-        tab_editor.check_system(origin_x, tab_origin_y, system)
+        tab_editor.check_system(origin_x, tab_origin_y, system, bar_top, bar_bottom)
       else
         note_editor.check_system(origin_x, tab_origin_y, system.events)
       end
@@ -511,7 +533,7 @@ local function main()
     -- tab_editor.end_frame(...)`.
     local note_editor_changed = note_editor.end_frame(ctx, take)
     local tab_editor_changed = tab_editor.end_frame(ctx)
-    pending_recompute = note_editor_changed or tab_editor_changed or wide_leap_toggled
+    pending_recompute = note_editor_changed or tab_editor_changed or wide_leap_toggled or zoom_changed
 
     local total_height = geo.top_reserve + (#systems * geo.system_pitch - config.layout.system_gap) + BOTTOM_MARGIN
 
@@ -573,6 +595,7 @@ local function main()
     local canvas_w = math.max(total_width, avail_w)
     local canvas_h = math.max(total_height, avail_h)
     reaper.ImGui_InvisibleButton(ctx, "score_canvas", canvas_w, canvas_h)
+    reaper.ImGui_PopFont(ctx)
   end
   reaper.ImGui_EndChild(ctx)
 end

@@ -156,6 +156,7 @@ local REST_RECT_W, REST_RECT_H = 8, 4 -- whole/half rest rectangle size
 local DOT_RADIUS = 1.5 -- px, an augmentation dot (dotted note/rest)
 local DOT_GAP = 4 -- px between a notehead/rest glyph's own right edge and its dot
 local NOTE_NAME_GAP = 4 -- px between a notehead's own radius and its "Show Note Names" cheat-sheet text, on whichever side (above/below) is away from the stem
+local NOTE_NAME_FONT_DELTA = 1 -- pt smaller than the base font the "Show Note Names"/"Show String/Fret" cheat-sheet text renders at, so the combined "string(fret)name" form (both toggles on) takes less horizontal room
 local BRACE_X_OFFSET = 6 -- px left of the staff lines' start where the brace sits
 local BRACE_BULGE = 8 -- px further left the brace bulges at its midpoint
 local CLEF_X_OFFSET = 4 -- px right of the staff start where the clef sits
@@ -758,6 +759,14 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
     local x = origin_x + event.x
     local by_staff = {}
 
+    -- Chord size (real notes only, not an X notehead) - see pending_note_
+    -- names' own comment for why a chord's names go to the LEFT instead of
+    -- above/below by stem direction.
+    local chord_note_count = 0
+    for j = 1, #event.notes do
+      if event.notes[j].string then chord_note_count = chord_note_count + 1 end
+    end
+
     if measure_ticks then
       while measure_ptr <= #measure_ticks and event.tick >= measure_ticks[measure_ptr] do
         accidental_state = {}
@@ -890,11 +899,19 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
           draw_list, actual_x - note_radius - LEDGER_OVERHANG, ly, actual_x + note_radius + LEDGER_OVERHANG, ly, COLOR_LINE, 1.0)
       end
 
+      -- Leftmost edge of whatever's drawn at this note's own x - just the
+      -- notehead by default, or further left when an accidental (plus any
+      -- of its own stacking, for a close interval sharing this column) is
+      -- also shown. pending_note_names' own chord case anchors off this so
+      -- a chord's leftward name never lands on top of an accidental.
+      local left_edge_x = actual_x - note_radius
       if shows_accidental[j] then
         local symbol = ACCIDENTAL_SYMBOLS[shows_accidental[j]] or "?"
         local w, h = reaper.ImGui_CalcTextSize(ctx, symbol)
         local extra = (accidental_column[j] or 0) * ACCIDENTAL_STACK_GAP
-        reaper.ImGui_DrawList_AddText(draw_list, actual_x - note_radius - ACCIDENTAL_GAP - w - extra, y - h / 2, COLOR_NOTE, symbol)
+        local acc_x = actual_x - note_radius - ACCIDENTAL_GAP - w - extra
+        reaper.ImGui_DrawList_AddText(draw_list, acc_x, y - h / 2, COLOR_NOTE, symbol)
+        left_edge_x = acc_x
       end
 
       if note.string then
@@ -958,17 +975,37 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
         right_edge_x = right_edge_x + DOT_GAP + DOT_RADIUS * 2
       end
 
-      -- "Show Note Names" cheat sheet (config.show_note_names, ui_chrome.
-      -- lua's checkbox): the note's plain sharps-only name (notation_
-      -- model.pitch_to_name, e.g. "E1"), centered under/over the notehead -
-      -- below when the note ends up stem-up, above when stem-down (the side
-      -- away from the stem - see pending_note_names' own comment for why
-      -- this can't be drawn here yet). Skipped for X-notehead notes
-      -- (note.string == nil) - those aren't a real playable pitch to name.
-      if config.show_note_names and note.string then
+      -- "Show Note Names"/"Show String/Fret" cheat sheets (config.show_
+      -- note_names / config.show_string_fret, ui_chrome.lua's checkboxes -
+      -- independently toggleable, see that file's own comment): the note's
+      -- plain sharps-only name (notation_model.pitch_to_name, e.g. "E1"),
+      -- its "string(fret)" tab position (e.g. "1(5)" for string 1, fret 5 -
+      -- the exact same notation tab_editor.lua's Tab Code quick-entry box
+      -- accepts, so a value read off the score types back in verbatim), or
+      -- both concatenated ("1(5)E1") when both toggles are on. A single
+      -- note gets it centered under/over the notehead - below when the note
+      -- ends up stem-up, above when stem-down (the side away from the
+      -- stem - see pending_note_names' own comment for why this can't be
+      -- drawn here yet). A CHORD (chord_note_count > 1) instead gets its
+      -- annotations to the LEFT, one per notehead at that notehead's own y
+      -- (mirroring draw_tab.lua's identical fret-number-chord treatment,
+      -- and for the same reason): stacking every chord member's text above/
+      -- below the SAME shared stem side crowds them against each other and
+      -- against neighboring noteheads exactly when there's the most to
+      -- read, where left-placement instead spreads them across each note's
+      -- own row. left_edge_x already accounts for an accidental if this
+      -- note shows one. Skipped for X-notehead notes (note.string == nil) -
+      -- those aren't a real playable pitch/position to annotate.
+      if (config.show_note_names or config.show_string_fret) and note.string then
+        local string_fret = config.show_string_fret
+          and string.format("%d(%s)", notation_model.display_string_number(config, note.string),
+            notation_model.display_fret_label(config, note.fret))
+        local note_name = config.show_note_names and notation_model.pitch_to_name(note.pitch)
+        local annotation = (string_fret or "") .. (note_name or "")
         pending_note_names[#pending_note_names + 1] = {
-          x = actual_x, y = y, name = notation_model.pitch_to_name(note.pitch),
+          x = actual_x, y = y, name = annotation,
           note_radius = note_radius, event_index = i, staff = staff,
+          left_edge_x = left_edge_x, is_chord = chord_note_count > 1,
         }
       end
 
@@ -991,10 +1028,18 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
       -- ringing across a system-wrap boundary won't get a marking - out
       -- of scope for now, the same class of limitation as this file's
       -- other cross-system simplifications (rests, likewise, only look
-      -- within their own system's slice of the render model).
+      -- within their own system's slice of the render model). Capped at
+      -- LET_RING_GAP shy of the next note's own x, mirroring the gap
+      -- already left at the START of this line (next to this note's own
+      -- notehead) - without it, note.endppq can map at or past the next
+      -- note's exact position (its sustain audibly overlaps the next
+      -- attack), which reads as "the next note rings too," not "this note
+      -- rings into the next one."
       if note.string and note.endppq and not note.tied_to_next
           and render_model[i + 1] and note.endppq > render_model[i + 1].tick then
         local ring_end_x = origin_x + layout_engine.x_for_tick(render_model, note.endppq)
+        local next_x = origin_x + render_model[i + 1].x
+        ring_end_x = math.min(ring_end_x, next_x - LET_RING_GAP)
         draw_let_ring_line(draw_list, right_edge_x + LET_RING_GAP, ring_end_x, y, COLOR_LET_RING)
       end
 
@@ -1408,28 +1453,48 @@ function M.draw(ctx, draw_list, origin_x, middle_c_y, render_model, beat_ticks_l
     draw_legato_arc(run, stem_down)
   end
 
-  -- "Show Note Names" cheat sheet (see pending_note_names' own comment
-  -- above) - drawn here, after Pass 2 has resolved every event/staff's real
-  -- stem direction, same deferred-drawing reason as the legato arcs just
-  -- above. Below the notehead for a stem-up note, above it for a stem-down
-  -- one - the side away from the stem, matching where the legato arc itself
-  -- lands relative to the stem (see draw_legato_arc's own arc_y).
+  -- "Show Note Names"/"Show String/Fret" cheat sheets (see pending_note_
+  -- names' own comment above) - drawn here, after Pass 2 has resolved
+  -- every event/staff's real stem direction, same deferred-drawing reason
+  -- as the legato arcs just above. A single note goes below the notehead
+  -- for a stem-up note, above
+  -- it for a stem-down one - the side away from the stem, matching where
+  -- the legato arc itself lands relative to the stem (see draw_legato_
+  -- arc's own arc_y). A chord (pn.is_chord) instead goes to the LEFT, at
+  -- the notehead's own y, using left_edge_x (already clear of an
+  -- accidental if this note shows one) - see pending_note_names' own
+  -- comment for why. Rendered NOTE_NAME_FONT_DELTA pt smaller than the
+  -- surrounding staff text (own PushFont/PopFont, matching draw_tab.lua's
+  -- identical treatment) so the combined "string(fret)name" form doesn't
+  -- need as much horizontal room; CalcTextSize is called inside this same
+  -- push so the measured width matches what's actually drawn.
+  if #pending_note_names > 0 then
+    local base_size = reaper.ImGui_GetFontSize(ctx)
+    reaper.ImGui_PushFont(ctx, nil, base_size - NOTE_NAME_FONT_DELTA)
+  end
   for _, pn in ipairs(pending_note_names) do
-    local staff_data = pn.staff and event_staff[pn.event_index] and event_staff[pn.event_index][pn.staff]
-    local direction = staff_data and staff_data.direction
-    local stem_down
-    if direction then
-      stem_down = direction == "down"
-    else
-      -- Defensive fallback only - every note with a string should have
-      -- resolved a direction in Pass 2 above.
-      stem_down = pn.y <= y_at(middle_line_offset(pn.staff or "treble"))
-    end
     local nw, nh = reaper.ImGui_CalcTextSize(ctx, pn.name)
-    local name_y = stem_down
-      and (pn.y - pn.note_radius - NOTE_NAME_GAP - nh)
-      or (pn.y + pn.note_radius + NOTE_NAME_GAP)
-    reaper.ImGui_DrawList_AddText(draw_list, pn.x - nw / 2, name_y, COLOR_NOTE_NAME, pn.name)
+    if pn.is_chord then
+      reaper.ImGui_DrawList_AddText(draw_list, pn.left_edge_x - NOTE_NAME_GAP - nw, pn.y - nh / 2, COLOR_NOTE_NAME, pn.name)
+    else
+      local staff_data = pn.staff and event_staff[pn.event_index] and event_staff[pn.event_index][pn.staff]
+      local direction = staff_data and staff_data.direction
+      local stem_down
+      if direction then
+        stem_down = direction == "down"
+      else
+        -- Defensive fallback only - every note with a string should have
+        -- resolved a direction in Pass 2 above.
+        stem_down = pn.y <= y_at(middle_line_offset(pn.staff or "treble"))
+      end
+      local name_y = stem_down
+        and (pn.y - pn.note_radius - NOTE_NAME_GAP - nh)
+        or (pn.y + pn.note_radius + NOTE_NAME_GAP)
+      reaper.ImGui_DrawList_AddText(draw_list, pn.x - nw / 2, name_y, COLOR_NOTE_NAME, pn.name)
+    end
+  end
+  if #pending_note_names > 0 then
+    reaper.ImGui_PopFont(ctx)
   end
 
   -- Pass 2.5: tuplet brackets/numerals for detected tuplets

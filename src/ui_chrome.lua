@@ -322,12 +322,18 @@ function M.save_persisted(cfg)
   -- Same "global display preference, no per-take save" treatment as colors
   -- above - see config.lua's header.
   reaper.SetExtState(EXT_SECTION, "show_note_names", cfg.show_note_names and "1" or "0", true)
+  -- Same treatment as show_note_names above - see config.lua's header on
+  -- show_string_fret.
+  reaper.SetExtState(EXT_SECTION, "show_string_fret", cfg.show_string_fret and "1" or "0", true)
   -- Same "global display preference, no per-take save" treatment as
   -- show_note_names above - see config.lua's header on grid_enabled.
   reaper.SetExtState(EXT_SECTION, "grid_enabled", cfg.grid_enabled and "1" or "0", true)
   reaper.SetExtState(EXT_SECTION, "grid_denominator", tostring(cfg.grid_denominator or 16), true)
   reaper.SetExtState(EXT_SECTION, "grid_triplet", cfg.grid_triplet and "1" or "0", true)
   reaper.SetExtState(EXT_SECTION, "print_scale", tostring(cfg.print_scale or 0.4), true)
+  -- Same "global display preference, no per-take save" treatment as the
+  -- others above - see config.lua's header on zoom.
+  reaper.SetExtState(EXT_SECTION, "zoom", tostring(cfg.zoom or 1.0), true)
   -- Composer/arranger are the one "last used globally" convenience that
   -- makes sense for score-header info - see config.lua's header. title is
   -- piece-specific and deliberately has no global fallback, so it's saved
@@ -393,6 +399,11 @@ function M.load_persisted(cfg)
     cfg.show_note_names = (show_names_str == "1")
   end
 
+  local show_string_fret_str = reaper.GetExtState(EXT_SECTION, "show_string_fret")
+  if show_string_fret_str ~= "" then
+    cfg.show_string_fret = (show_string_fret_str == "1")
+  end
+
   local grid_enabled_str = reaper.GetExtState(EXT_SECTION, "grid_enabled")
   if grid_enabled_str ~= "" then
     cfg.grid_enabled = (grid_enabled_str == "1")
@@ -414,6 +425,17 @@ function M.load_persisted(cfg)
     local n = tonumber(print_scale_str)
     if n then cfg.print_scale = n end
   end
+
+  local zoom_str = reaper.GetExtState(EXT_SECTION, "zoom")
+  if zoom_str and zoom_str ~= "" then
+    local n = tonumber(zoom_str)
+    if n then cfg.zoom = n end
+  end
+  -- cfg IS the config module (main.lua calls this as ui_chrome.load_
+  -- persisted(config)), so cfg.apply_zoom is config.apply_zoom - rebuilds
+  -- config.layout from whatever zoom was just restored, before the very
+  -- first frame reads it.
+  cfg.apply_zoom()
 
   local composer_str = reaper.GetExtState(EXT_SECTION, "composer")
   if composer_str and composer_str ~= "" then
@@ -1010,6 +1032,19 @@ function M.draw_mode_toggles(ctx, cfg, take)
 
   reaper.ImGui_SameLine(ctx)
 
+  -- No longer mutually exclusive with Show Note Names (see config.lua's
+  -- own header on show_string_fret) - draw_notation.lua's annotation
+  -- builder concatenates both into one "string(fret)name" label (e.g.
+  -- "1(5)A4") when both are on, rather than one turning the other off.
+  local sf_changed, new_show_string_fret = reaper.ImGui_Checkbox(ctx, "Show String/Fret", cfg.show_string_fret or false)
+  if sf_changed then
+    cfg.show_string_fret = new_show_string_fret
+    M.save_persisted(cfg)
+    M.save_for_take(take, cfg)
+  end
+
+  reaper.ImGui_SameLine(ctx)
+
   -- Not persisted (see config.wide_leap_enabled's own header) - a style
   -- choice made per editing session, same "not saved" treatment as
   -- edit_mode above, not a per-take property like instrument/tuning.
@@ -1082,6 +1117,49 @@ function M.draw_grid_options(ctx, cfg)
   if changed then
     M.save_persisted(cfg)
   end
+end
+
+-- Magnification (config.lua's own header on cfg.zoom) - a slider rather
+-- than the Grid row's checkbox/combo mix, since this is one continuous
+-- value, not a handful of discrete choices. Range floors at 0.5 (half
+-- size - still legible, well past where anyone would actually want to go)
+-- and caps at 2.0 (double size); "Reset" jumps straight back to 1.0, this
+-- app's original unscaled look, without having to drag the slider exactly
+-- onto it by hand. Always visible (not tucked into a CollapsingHeader),
+-- same visibility as the Grid row just above it - zoom is something a
+-- player reaches for constantly while reading, not a one-time setup field.
+-- cfg.apply_zoom() rebuilds cfg.layout from the new value immediately, but
+-- that alone ISN'T enough to actually move anything on screen: main.lua's
+-- cached_render_model is only rebuilt from config.layout when its own
+-- note-hash/settings-changed check trips, not just because config.layout's
+-- OWN numbers changed underneath it. Returns whether this frame changed
+-- anything, same contract as draw_mode_toggles' own wide_leap_toggled -
+-- the caller has to OR this into pending_recompute so the next frame's
+-- recompute block actually re-runs layout_engine.compute against the new
+-- scale (a harmless one-frame lag, same convention wide_leap_toggled
+-- already accepts).
+function M.draw_zoom_control(ctx, cfg)
+  local changed = false
+
+  reaper.ImGui_SetNextItemWidth(ctx, 160)
+  local rv_zoom, new_zoom = reaper.ImGui_SliderDouble(ctx, "Zoom", cfg.zoom or 1.0, 0.5, 2.0, "%.2fx")
+  if rv_zoom then
+    cfg.zoom = new_zoom
+    changed = true
+  end
+
+  reaper.ImGui_SameLine(ctx)
+  if reaper.ImGui_Button(ctx, "Reset##zoom") then
+    cfg.zoom = 1.0
+    changed = true
+  end
+
+  if changed then
+    cfg.apply_zoom()
+    M.save_persisted(cfg)
+  end
+
+  return changed
 end
 
 return M

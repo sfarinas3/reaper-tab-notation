@@ -106,12 +106,16 @@
 -- note" to usefully chain into there.
 --
 -- Quick entry (see parse_quick_entry/commit_create/commit_edit): both
--- popups also expose an optional single "string.fret.duration" box, e.g.
--- "8.12.1/8+" for string 8, fret 12, an eighth-note triplet - a
--- D&D-dice-notation-style shortcut typeable entirely from the numeric
--- keypad (only digits, ".", "/", and "+" are needed; "+" stands in for the
--- Duration field's own "T" triplet suffix, since the keypad has no
--- letters). Filling this box in OVERRIDES the three classic fields
+-- popups also expose an optional single "string(fret)duration" box, e.g.
+-- "8(12)1/8+" for string 8, fret 12, an eighth-note triplet - matches the
+-- same string(fret) notation the "Show String/Fret" cheat sheet prints
+-- directly on the notation staff (draw_notation.lua), so a value read off
+-- the score can be typed back in verbatim, parentheses included; "+"
+-- stands in for the Duration field's own "T" triplet suffix. An earlier
+-- version of this format ("string.fret.duration") was typeable entirely
+-- from the numeric keypad - the parentheses here no longer are, a
+-- deliberate tradeoff in favor of matching the on-staff notation exactly.
+-- Filling this box in OVERRIDES the three classic fields
 -- entirely at commit time, rather than merging with them. In the Create
 -- popup it's just a faster way to type the same three values already
 -- being entered there. In the Edit popup it additionally powers a new
@@ -145,7 +149,7 @@
 --
 -- Guitar technique suffixes (see strip_technique_suffix/parse_fret_input):
 -- typed right after a fret number - classic Fret field ("12l") or quick
--- entry's own fret segment ("8.12l.1/4") - "l" (legato: hammer-on/pull-
+-- entry's own fret segment ("8(12l)1/4") - "l" (legato: hammer-on/pull-
 -- off) and "t" (tap) tag the note via midi_read.lua's technique P_EXT map
 -- (the same mechanism note_editor.lua's Shamisen popup uses, just with a
 -- disjoint guitar id range - see GUITAR_TECHNIQUE_LEGATO/_TAP), since a
@@ -169,38 +173,73 @@
 -- the Duration field show the compact grammar above on hover, since
 -- neither is fully self-explanatory from its label alone.
 --
--- Drag-to-select + mass delete (see begin_frame/check_system/M.end_frame/
--- mass_delete_selected): a press-and-hold that moves far enough
--- (DRAG_SELECT_THRESHOLD) becomes a rubber-band rectangle instead of the
--- ordinary click-to-create/edit gesture - every note whose position falls
--- inside it gets added to selected_notes and a highlight ring (filled tint
--- plus a solid outline, so it reads clearly regardless of the numeral's own
--- color - see SELECTION_MARK_FILL/SELECTION_MARK_BORDER), spanning across a
--- system/line-wrap boundary for free since the rectangle is plain screen
--- coordinates, not tied to any one system. With a selection active and no
--- popup open, deletion is offered two ways: the Delete key
--- (mass_delete_selected, one undo step) or right-clicking anywhere to open
--- a small context menu ("Delete N Notes" / "Move to String..." / "Clear
--- Selection" - see CONTEXT_MENU_POPUP_ID below), for anyone who'd rather
--- click than reach for the keyboard; Escape also clears the selection
--- without deleting anything, and a small status line names how many notes
--- are selected in the meantime. A plain click (a press that never crosses
--- the drag threshold) still behaves exactly as before and always clears
--- whatever was previously selected first - there's no modifier-key
--- add-to-selection mode, out of scope for now.
+-- Drag-to-select + copy/paste/delete (see begin_frame/check_system/M.end_
+-- frame/mass_delete_selected/copy_selected/paste_clipboard): a press-and-
+-- hold that moves far enough (DRAG_SELECT_THRESHOLD) becomes a rubber-band
+-- rectangle instead of the ordinary click-to-create/edit gesture. Unlike a
+-- single click (which only ever targets the TAB staff - see this file's
+-- own header elsewhere on why), the rectangle test is WHOLE-SYSTEM-BAND:
+-- it selects by horizontal (time) position alone, as long as the rectangle
+-- vertically overlaps ANY part of the system (bar_top..bar_bottom, passed
+-- in from main.lua - the same span the barlines themselves are drawn
+-- across, covering both the notation staff above and the tab staff below).
+-- This means dragging over the SCORE selects exactly the same notes as
+-- dragging over the TAB at the same horizontal position - there's no
+-- separate notation-staff hit-testing to maintain, and no way to select
+-- only a subset of strings via a tight vertical drag (an accepted
+-- trade-off - this app has no per-note visual marker on the notation staff
+-- to distinguish that anyway). Every selected note gets a highlight ring on
+-- the TAB staff (filled tint plus a solid outline, so it reads clearly
+-- regardless of the numeral's own color - see SELECTION_MARK_FILL/
+-- SELECTION_MARK_BORDER), spanning across a system/line-wrap boundary for
+-- free since the rectangle is plain screen coordinates, not tied to any one
+-- system. A plain click (a press that never crosses the drag threshold)
+-- still behaves exactly as before and always clears whatever was
+-- previously selected first - there's no modifier-key add-to-selection
+-- mode, out of scope for now.
 --
--- "Move to String" (see try_move_selected_to_string/draw_move_popup): the
--- context menu's second option - moves every selected note onto one typed
--- target string, KEEPING EACH NOTE'S OWN PITCH fixed and re-deriving its
--- fret (the opposite of a single-note Edit popup retarget, which keeps
--- FRET fixed - see commit_edit's own comment for why that one's different;
--- here, "move this passage to one string" only makes sense as "keep
--- playing the same pitches, just on a different string"). Validates every
--- selected note BEFORE writing anything and refuses the whole move, with a
--- specific reason, if any one of them can't land there - an out-of-range
--- fret, two selected notes overlapping in time, or a selected note landing
--- on top of an existing note already on that string - rather than partially
--- applying and leaving a harder mess to undo by hand.
+-- With a selection active, Copy (Ctrl+C) snapshots every selected note
+-- (string/pitch/duration/velocity/technique, and each note's own tick
+-- RELATIVE to the earliest selected tick) into clipboard, an in-memory,
+-- module-local table - nothing is written to the take yet, and nothing
+-- else in this app reads or persists it. Paste (Ctrl+V) inserts a fresh
+-- copy of every clipboard entry anchored at REAPER's own edit cursor (the
+-- standard piano-roll convention - move the cursor to an empty measure by
+-- clicking a grid line there, same as seeking playback, then paste),
+-- refusing the WHOLE paste with no partial write if any entry would
+-- collide with an existing note or with another entry in the same batch
+-- (see paste_clipboard). The clipboard survives after a paste (so the same
+-- passage can be pasted repeatedly) and after the selection changes (so
+-- copying, then selecting something else to delete, doesn't lose it).
+-- Delete (the Delete key, mass_delete_selected, one undo step) removes
+-- every selected note outright - deliberately NEVER falls back to removing
+-- the whole measure just because every note in it happened to be selected;
+-- that's a separate, explicit operation (delete_measure) since it changes
+-- the take's timeline (see below), not just its note content. Escape
+-- clears the selection without deleting anything, and a small status line
+-- names how many notes are selected in the meantime, or flashes a brief
+-- confirmation/error after Copy/Paste/Delete Measure (see flash_status).
+--
+-- Right-clicking opens a context menu offering Copy/Paste/Delete N Notes
+-- (each mirroring its keyboard shortcut, grayed out via BeginDisabled when
+-- there's nothing to act on) plus Delete Measure (see below) and Clear
+-- Selection - available regardless of whether a selection is currently
+-- active, unlike the old version of this menu, since Paste and Delete
+-- Measure both make sense with no selection at all.
+--
+-- Delete Measure (delete_measure, context menu only - see hovered_measure/
+-- context_menu_measure for how a right-click resolves WHICH measure it
+-- landed on): removes every note starting inside that measure, then shifts
+-- every LATER note in THIS TAKE left by the measure's own tick length,
+-- closing the gap. Deliberately does NOT touch REAPER's project tempo/
+-- time-signature map (the actual source of every barline this app draws,
+-- see notation_model.measure_boundaries) - that would ripple the whole
+-- project's timeline, every other track included, for what's meant to be a
+-- one-take editing tool. Since this app's own measure count is entirely
+-- content-driven (measure_boundaries walks only as far as the LAST note's
+-- own endppq, not any fixed take/item length), shifting the notes left is
+-- self-correcting: the next recompute simply renders one fewer trailing
+-- measure, with no leftover empty gap to clean up separately.
 --
 -- Create write-back: reaper.MIDI_InsertNote(take, selected, muted,
 -- startppqpos, endppqpos, chan, pitch, vel, noSortIn) - verified against
@@ -232,13 +271,26 @@ local notation_model = require('notation_model')
 
 local M = {}
 
-local HIT_RADIUS = 8 -- px - same value as note_editor.lua's own constant; duplicated rather than shared, see this file's header
+-- Base (unzoomed) pixel values - see hit_radius()/click_slack() below,
+-- which are what every actual hit-test in this file reads. Magnification
+-- (config.zoom) has to scale these too, not just the note/staff spacing it
+-- already scales via config.layout: at 2x zoom a note is drawn twice as
+-- far from its neighbors, so a FIXED click radius would effectively
+-- tighten (harder to click); at 0.5x zoom the same fixed radius would
+-- effectively loosen (too easy to hit the wrong note). Kept as functions
+-- rather than plain locals so they always reflect the CURRENT zoom, read
+-- fresh on every click check - same "no cache to invalidate" convention
+-- config.layout's own live rescaling already follows.
+local HIT_RADIUS_BASE = 8 -- px - same value as note_editor.lua's own constant; duplicated rather than shared, see this file's header
 local CREATE_POPUP_ID = "tab_editor_create_popup"
 local EDIT_POPUP_ID = "tab_editor_edit_popup"
 local CONTEXT_MENU_POPUP_ID = "tab_editor_context_menu"
-local MOVE_POPUP_ID = "tab_editor_move_popup"
 local UNDO_ALL = -1 -- Undo_EndBlock's extraflags: -1 = all undo-state flags, the standard idiom (matches note_editor.lua)
-local CLICK_SLACK = 20 -- px - horizontal gate margin past a system's own barline_x range
+local CLICK_SLACK_BASE = 20 -- px - horizontal gate margin past a system's own barline_x range
+local function hit_radius() return HIT_RADIUS_BASE * (config.zoom or 1.0) end
+local function click_slack() return CLICK_SLACK_BASE * (config.zoom or 1.0) end
+local ALT_STRING_BTN_PADDING = 16 -- px - estimated frame padding (both sides) around a button's own text, for draw_edit_popup's "Same pitch on:" row wrapping
+local ALT_STRING_ITEM_SPACING = 8 -- px - estimated default ImGui item spacing between two SameLine'd buttons
 
 -- Drag-select overlay colors - a fixed accent (not derived from config.
 -- color_fg/bg) same as draw_tab.lua's COLOR_TECHNIQUE/COLOR_UNREACHABLE:
@@ -253,7 +305,8 @@ local SELECTION_MARK_BORDER = 0x40C0FFFF -- solid ring outlining a selected note
 local SELECTION_MARK_RADIUS = 10 -- px
 local SELECTION_RECT_FILL = 0x4090FF30 -- faint fill while a drag is in progress
 local SELECTION_RECT_BORDER = 0x4090FFFF -- solid border while a drag is in progress
-local SELECTION_HUD_COLOR = 0xFFFFFFFF -- "N notes selected" status text
+local SELECTION_HUD_COLOR = 0xFFFFFFFF -- "N notes selected" status text, also used for flash_status's own brief confirmation/error text
+local FLASH_MESSAGE_FRAMES = 90 -- ~1.5s at 60fps - how long flash_status's message stays on screen
 
 -- Hover-tooltip text for the Tab Code/Duration fields (see
 -- reaper.ImGui_IsItemHovered/SetTooltip call sites in draw_create_popup/
@@ -277,9 +330,9 @@ local SHAMISEN_FRET_LABEL_HELP =
   "(each octave's 2 half-tone positions are marked #/b, not a number)."
 
 local QUICK_ENTRY_TOOLTIP_CREATE_BASE =
-  "Tab Code: string.fret.duration\n" ..
-  "e.g. 8.12.1/8+ = string 8, fret 12, eighth-note triplet\n" ..
-  "e.g. 8.12l.1/4 = string 8, fret 12, quarter note, legato\n\n" ..
+  "Tab Code: string(fret)duration\n" ..
+  "e.g. 8(12)1/8+ = string 8, fret 12, eighth-note triplet\n" ..
+  "e.g. 8(12l)1/4 = string 8, fret 12, quarter note, legato\n\n" ..
   "Fret technique suffix (optional, right after the number):\n" ..
   FRET_TECHNIQUE_HELP .. "\n\n" ..
   "Duration accepts:\n" ..
@@ -289,9 +342,9 @@ local QUICK_ENTRY_TOOLTIP_CREATE_BASE =
   "             writes nothing)\n\n" ..
   "Overrides the String/Fret/Duration fields below when filled in."
 local QUICK_ENTRY_TOOLTIP_EDIT_BASE =
-  "Tab Code: string.fret.duration\n" ..
-  "e.g. 8.12.1/8+ = string 8, fret 12, eighth-note triplet\n" ..
-  "e.g. 8.12l.1/4 = string 8, fret 12, quarter note, legato\n\n" ..
+  "Tab Code: string(fret)duration\n" ..
+  "e.g. 8(12)1/8+ = string 8, fret 12, eighth-note triplet\n" ..
+  "e.g. 8(12l)1/4 = string 8, fret 12, quarter note, legato\n\n" ..
   "Fret technique suffix (optional, right after the number):\n" ..
   FRET_TECHNIQUE_HELP .. "\n\n" ..
   "Duration accepts:\n" ..
@@ -338,7 +391,7 @@ local function round(v)
 end
 
 -- Guitar technique suffixes, typed directly after a fret number (e.g.
--- "12l" for a legato-flagged fret 12, "8.12.1/4" -> "8.12l.1/4" in Tab
+-- "12l" for a legato-flagged fret 12, "8(12)1/4" -> "8(12l)1/4" in Tab
 -- Code) - see parse_fret_input below for where these get stripped off.
 --
 -- "l" (legato: hammer-on/pull-off), "t" (tap), and "lt" (both at once) are
@@ -571,11 +624,11 @@ local function parse_string_index(buf)
   return notation_model.display_string_number(config, s)
 end
 
--- Optional compact "string.fret.duration" entry, e.g. "8.12.1/8+" for
--- string 8, fret 12, an eighth-note triplet, or "8.12l.1/8+" for the same
--- note legato-flagged - a D&D-dice-notation-style shortcut typeable
--- entirely from the numeric keypad plus letters for the fret's own
--- technique suffix (digits, ".", "/", "+", and one of l/t/lt/pm/ph - see
+-- Optional compact "string(fret)duration" entry, e.g. "8(12)1/8+" for
+-- string 8, fret 12, an eighth-note triplet, or "8(12l)1/8+" for the same
+-- note legato-flagged - matches the "Show String/Fret" cheat sheet's own
+-- on-staff notation exactly (see draw_notation.lua), plus letters for the
+-- fret's own technique suffix (one of l/t/lt/pm/ph inside the parens - see
 -- strip_technique_suffix; "t" here means TAP on the fret segment, NOT
 -- triplet - that's parse_duration_input's own trailing "t" on the
 -- DURATION segment, a different field, so the two never collide).
@@ -593,9 +646,9 @@ end
 -- typed text's own segment order.
 local function parse_quick_entry(buf)
   local trimmed = (buf or ""):match("^%s*(.-)%s*$")
-  local string_s, fret_s, duration_s = trimmed:match("^([^.]+)%.([^.]+)%.([^.]+)$")
+  local string_s, fret_s, duration_s = trimmed:match("^([^(]+)%((.-)%)([^()]+)$")
   if not string_s then
-    return nil, nil, nil, nil, nil, "Tab Code must be string.fret.duration (e.g. 8.12.1/8+)."
+    return nil, nil, nil, nil, nil, "Tab Code must be string(fret)duration (e.g. 8(12)1/8+)."
   end
 
   local string_idx = parse_string_index(string_s)
@@ -777,7 +830,7 @@ local technique_changed = false
 -- lua's own triplet convention - mouse polling is not centralized in this
 -- app, each module polls independently.
 local mouse_x, mouse_y, clicked = 0, 0, false
-local best_existing = nil -- { note, dist } - closest existing-note hit within HIT_RADIUS across every system checked this frame
+local best_existing = nil -- { note, dist } - closest existing-note hit within hit_radius() across every system checked this frame
 local best_empty = nil -- { tick, string_idx } - the empty grid cell hit for whichever system's gates passed this frame
 
 -- Drag-to-select state (begin_frame..end_frame, mirroring the click state
@@ -791,8 +844,20 @@ local drag_active = false -- true from mouse-down until release, regardless of w
 local drag_is_selecting = false -- true once movement has exceeded DRAG_SELECT_THRESHOLD this press - a genuine drag
 local drag_start_x, drag_start_y = 0, 0
 local drag_finished = false -- true for exactly the frame a drag-select gesture is released - check_system's cue to rectangle-hit-test against every system
-local selected_notes = {} -- key ("startppq:chan:pitch", same convention as the technique P_EXT map) -> true; drag-selected notes pending mass delete
+local selected_notes = {} -- key ("startppq:chan:pitch", same convention as the technique P_EXT map) -> true; drag-selected notes pending copy/mass delete
 local selected_marks = {} -- rebuilt fresh every frame in check_system: { {x, y}, ... } screen positions of every currently-selected note actually on screen this frame, for end_frame to draw a highlight over
+
+-- Which measure (by tick range) the mouse currently sits over, across any
+-- system checked this frame - refreshed every frame in check_system
+-- exactly like best_empty, using the same whole-system-band vertical gate
+-- as the drag-select rectangle (bar_top/bar_bottom, passed in from
+-- main.lua). nil whenever the mouse isn't over any system at all. Snapshot
+-- into context_menu_measure the instant a right-click opens the context
+-- menu (see M.end_frame) - by the time that menu's own Selectable is
+-- clicked, the mouse has moved onto the popup itself, so this can't just be
+-- read fresh at click time.
+local hovered_measure = nil -- { start_tick, end_tick } or nil
+local context_menu_measure = nil -- hovered_measure as of the click that opened the CURRENTLY OPEN context menu - what "Delete Measure" actually acts on
 
 local target_take = nil
 local collision_events = nil -- assigned_events, for the raw-span occupancy/collision checks - see header
@@ -815,12 +880,23 @@ local create_status = nil
 local edit_status = nil
 local popup_was_open = false
 
--- "Move to String" popup (see try_move_selected_to_string) - opened from
--- the right-click context menu on an active selection (see M.end_frame).
-local open_move_popup = false -- set inside the context menu's own BeginPopup/EndPopup, consumed right after - see M.end_frame for why this can't just call OpenPopup directly from in there
-local move_string_buf = "1"
-local move_status = nil
-local focus_move_input = false
+-- Copy/paste clipboard (see copy_selected/paste_clipboard) - in-memory,
+-- module-local, and never persisted: closing/reopening this script (or
+-- REAPER itself) loses it, same as any other app's clipboard being scoped
+-- to one running session. { entries = { {rel_tick, string, pitch,
+-- duration_ticks, vel, technique_id}, ... } }, rel_tick relative to the
+-- EARLIEST copied note's own startppq - or nil if nothing's ever been
+-- copied this session.
+local clipboard = nil
+
+-- Brief on-screen confirmation/error text (see flash_status) - Copy/Paste/
+-- Delete Measure all have no popup of their own to show a status line in
+-- (unlike Create/Edit/the old Move popup), so this draws near the mouse
+-- for FLASH_MESSAGE_FRAMES frames instead, then clears itself. Takes
+-- priority over the "N notes selected" HUD text below when both would
+-- otherwise want the same screen space.
+local flash_message = nil
+local flash_message_frames = 0
 
 -- Call once per frame before checking any system, right before the loop
 -- that draws each system's tab staff. assigned_events is main.lua's
@@ -867,6 +943,7 @@ function M.begin_frame(ctx, take, assigned_events)
   best_existing = nil
   best_empty = nil
   selected_marks = {}
+  hovered_measure = nil
 end
 
 local x_for_tick_in_system = layout_engine.x_for_tick_in_system
@@ -980,7 +1057,7 @@ function M.would_hit_editable(origin_x, tab_origin_y, system)
         local string_idx = note.string or config.layout.x_notehead_string
         local y = tab_origin_y + (string_idx - 1) * line_height
         local dx, dy = mouse_x - x, mouse_y - y
-        if math.sqrt(dx * dx + dy * dy) <= HIT_RADIUS then return true end
+        if math.sqrt(dx * dx + dy * dy) <= hit_radius() then return true end
       end
     end
   end
@@ -991,8 +1068,8 @@ function M.would_hit_editable(origin_x, tab_origin_y, system)
 
   local xs = system.barline_x
   if #xs == 0 then return false end
-  local lo_x = origin_x + xs[1] - CLICK_SLACK
-  local hi_x = origin_x + xs[#xs] + CLICK_SLACK
+  local lo_x = origin_x + xs[1] - click_slack()
+  local hi_x = origin_x + xs[#xs] + click_slack()
   if mouse_x < lo_x or mouse_x > hi_x then return false end
 
   local string_idx = round((mouse_y - tab_origin_y) / line_height) + 1
@@ -1002,8 +1079,12 @@ end
 
 -- Call once per system, right after that system's score_render.draw_system
 -- call - same slot as note_editor.check_system/measure_correction.
--- check_system.
-function M.check_system(origin_x, tab_origin_y, system)
+-- check_system. bar_top/bar_bottom are that same call's own return values
+-- (the barline's full vertical span, notation staff top through tab staff
+-- bottom) - used below for the whole-system-band drag-select test and for
+-- resolving hovered_measure, NOT for the existing single-click hit-tests
+-- further down, which stay tab-row-specific exactly as before (see header).
+function M.check_system(origin_x, tab_origin_y, system, bar_top, bar_bottom)
   local line_height = config.layout.line_height
   local n_strings = #config.tuning
 
@@ -1034,27 +1115,48 @@ function M.check_system(origin_x, tab_origin_y, system)
   -- drag covers, across every system checked this frame (screen-space
   -- coordinates need no per-system translation, so a drag spanning a
   -- system/line-wrap boundary naturally selects across it with no extra
-  -- work). Deliberately includes tied-continuation notes (unlike the
-  -- click-to-edit radius test below, which excludes them) - editing a
-  -- tied note directly doesn't make sense, but a rectangle "delete
-  -- everything visually in this box" should still catch one, since it's
-  -- a real, independently-deletable MIDI note.
+  -- work). Whole-system-band, not per-note y (see header on why): a note
+  -- is selected as soon as its EVENT X falls in the rectangle's x-range,
+  -- as long as the rectangle's y-range overlaps this system's bar_top..
+  -- bar_bottom AT ALL - so dragging over the score, the tab, or both
+  -- selects identically. Deliberately includes tied-continuation notes
+  -- (unlike the click-to-edit radius test below, which excludes them) -
+  -- editing a tied note directly doesn't make sense, but a rectangle
+  -- "delete everything visually in this box" should still catch one,
+  -- since it's a real, independently-deletable MIDI note.
   if drag_finished then
     local x0, x1 = math.min(drag_start_x, mouse_x), math.max(drag_start_x, mouse_x)
     local y0, y1 = math.min(drag_start_y, mouse_y), math.max(drag_start_y, mouse_y)
-    for i = 1, #system.events do
-      local event = system.events[i]
-      local x = origin_x + event.x
-      if x >= x0 and x <= x1 then
-        for j = 1, #event.notes do
-          local note = event.notes[j]
-          if note.string then
-            local y = tab_origin_y + (note.string - 1) * line_height
-            if y >= y0 and y <= y1 then
+    if y1 >= bar_top and y0 <= bar_bottom then
+      for i = 1, #system.events do
+        local event = system.events[i]
+        local x = origin_x + event.x
+        if x >= x0 and x <= x1 then
+          for j = 1, #event.notes do
+            local note = event.notes[j]
+            if note.string then
               selected_notes[note.startppq .. ":" .. note.chan .. ":" .. note.pitch] = true
             end
           end
         end
+      end
+    end
+  end
+
+  -- hovered_measure: which measure (if any) the mouse currently sits over
+  -- in THIS system - same whole-system-band vertical gate as the drag-
+  -- select rectangle above, paired with a horizontal test against this
+  -- system's own measure boundaries (system.ticks/barline_x, parallel
+  -- arrays - see layout_engine.wrap_into_systems). Refreshed unconditionally
+  -- every frame (not just on a right-click) so M.end_frame can snapshot
+  -- whatever's current the instant a right-click actually happens.
+  if mouse_y >= bar_top and mouse_y <= bar_bottom then
+    local ticks, xs = system.ticks, system.barline_x
+    for i = 1, #ticks - 1 do
+      local x_lo, x_hi = origin_x + xs[i], origin_x + xs[i + 1]
+      if mouse_x >= x_lo and mouse_x <= x_hi then
+        hovered_measure = { start_tick = ticks[i], end_tick = ticks[i + 1] }
+        break
       end
     end
   end
@@ -1074,7 +1176,7 @@ function M.check_system(origin_x, tab_origin_y, system)
         local y = tab_origin_y + (string_idx - 1) * line_height
         local dx, dy = mouse_x - x, mouse_y - y
         local dist = math.sqrt(dx * dx + dy * dy)
-        if dist <= HIT_RADIUS and (not best_existing or dist < best_existing.dist) then
+        if dist <= hit_radius() and (not best_existing or dist < best_existing.dist) then
           best_existing = { note = note, dist = dist }
         end
       end
@@ -1096,8 +1198,8 @@ function M.check_system(origin_x, tab_origin_y, system)
 
   local xs = system.barline_x
   if #xs == 0 then return end
-  local lo_x = origin_x + xs[1] - CLICK_SLACK
-  local hi_x = origin_x + xs[#xs] + CLICK_SLACK
+  local lo_x = origin_x + xs[1] - click_slack()
+  local hi_x = origin_x + xs[#xs] + click_slack()
   if mouse_x < lo_x or mouse_x > hi_x then return end
 
   local string_idx = round((mouse_y - tab_origin_y) / line_height) + 1
@@ -1256,8 +1358,8 @@ end
 -- write_note_technique's own single-note version, just batched.
 -- Resolves selected_notes' KEYS back to actual current note records (idx
 -- included) via collision_events - shared by mass_delete_selected and
--- try_move_selected_to_string, both of which need the real, current note
--- data behind whatever's selected, not just the keys themselves.
+-- copy_selected, both of which need the real, current note data behind
+-- whatever's selected, not just the keys themselves.
 local function gather_selected_notes()
   local notes_out = {}
   for i = 1, #collision_events do
@@ -1293,107 +1395,200 @@ local function mass_delete_selected()
   selected_notes = {}
 end
 
--- Moves every selected note onto target_string, KEEPING EACH NOTE'S OWN
--- PITCH fixed and re-deriving its fret from that (the opposite convention
--- from a single-note Edit popup retarget, which keeps FRET fixed and lets
--- pitch move - see commit_edit's own comment on why that one's different).
--- A pitch-preserving move is what "put this whole passage on one string"
--- actually means musically - the notes already ARE specific pitches, this
--- just changes which string plays them; re-deriving fret is the same
--- pitch -> string/fret math fret_heuristic.lua already does at read time
--- (a note's fret is never stored, only chan/pitch), so nothing else needs
--- to change once chan is rewritten to target_string.
---
--- Refuses (returns false, reason) rather than partially applying, on
--- either kind of impossibility:
---   - a note's required fret on target_string lands outside 0..max_fret
---   - two selected notes overlap in time (they can't both play on one
---     string at once)
---   - a selected note would overlap an EXISTING, non-selected note that's
---     already on target_string
--- All three are checked BEFORE any write happens, same "validate
--- everything, then commit once" shape commit_create/commit_edit already
--- use for their own single-note collision checks - a mass operation like
--- this one failing halfway through, with some notes already moved and
--- others not, would leave a much harder mess to undo out of by hand.
+-- Generic time-overlap test on any two objects carrying startppq/endppq -
+-- shared by paste_clipboard's same-batch collision check below and (until
+-- it was removed) the old "Move to String" feature's own overlap check.
 local function notes_overlap(a, b)
   return a.startppq < b.endppq and b.startppq < a.endppq
 end
 
--- target_display is the typed/displayed string number (see
--- notation_model.display_string_number) - converted to the internal index
--- right after the range check, same pattern as parse_string_index, so
--- every message below can keep showing target_display (what the user
--- actually typed) while every real config.tuning/MIDI operation uses
--- target_string (the internal index).
-local function try_move_selected_to_string(target_display)
-  if not target_display or target_display < 1 or target_display > #config.tuning then
-    return false, string.format("String must be between 1 and %d.", #config.tuning)
-  end
-  local target_string = notation_model.display_string_number(config, target_display)
+-- Shows text near the mouse cursor for FLASH_MESSAGE_FRAMES frames, then
+-- clears itself (see flash_message's own comment) - the closest thing this
+-- file has to a toast notification, for the handful of actions below
+-- (Copy/Paste/Delete Measure) that have no popup of their own to report
+-- success/failure in.
+local function flash_status(text)
+  flash_message = text
+  flash_message_frames = FLASH_MESSAGE_FRAMES
+end
 
+local function selection_count()
+  local n = 0
+  for _ in pairs(selected_notes) do n = n + 1 end
+  return n
+end
+
+-- Snapshots every selected note into clipboard (see that variable's own
+-- comment on the shape) - a pure read, no take write, no undo step. Silent
+-- no-op with nothing selected, same convention as mass_delete_selected.
+-- Reads each note's technique tag from one whole-map read rather than
+-- write_note_technique's per-note helper (that one's a WRITE path) - same
+-- reasoning as mass_delete_selected's own batched map access.
+local function copy_selected()
   local doomed = gather_selected_notes()
-  if #doomed == 0 then return false, "Nothing selected." end
+  if #doomed == 0 then return end
 
-  -- Fret range check - each note's own pitch against target_string.
-  local moves = {}
+  local anchor = nil
   for _, note in ipairs(doomed) do
-    local fret = note.pitch - config.tuning[target_string] - config.capo
-    if fret < 0 or fret > config.max_fret then
-      return false, string.format(
-        "Can't move: the note at tick %d would need fret %s on string %d (must be 0-%s).",
-        note.startppq, notation_model.display_fret_label(config, fret), target_display,
-        notation_model.display_fret_label(config, config.max_fret))
-    end
-    moves[#moves + 1] = note
+    if not anchor or note.startppq < anchor then anchor = note.startppq end
   end
 
-  -- Selected notes can't overlap each other once they all share one string.
-  for a = 1, #moves do
-    for b = a + 1, #moves do
-      if notes_overlap(moves[a], moves[b]) then
-        return false, "Can't move: two of the selected notes overlap in time, so they can't both be on one string."
-      end
-    end
+  local map = midi_read.read_technique_map(target_take)
+  local entries = {}
+  for _, note in ipairs(doomed) do
+    entries[#entries + 1] = {
+      rel_tick = note.startppq - anchor,
+      string = note.string,
+      pitch = note.pitch,
+      duration_ticks = note.endppq - note.startppq,
+      vel = note.vel,
+      technique_id = map[note.startppq .. ":" .. note.chan .. ":" .. note.pitch],
+    }
+  end
+  clipboard = { entries = entries }
+  flash_status(string.format("Copied %d note%s", #entries, #entries == 1 and "" or "s"))
+end
+
+-- Inserts a fresh copy of every clipboard entry anchored at REAPER's own
+-- edit cursor (see header) - each entry's own start tick = cursor tick +
+-- its rel_tick from copy_selected. Validates every placement BEFORE
+-- writing anything, against both EXISTING notes (string_occupied, defined
+-- earlier in this file) and every OTHER entry in this same paste batch
+-- (notes_overlap, same helper the old Move-to-String feature used),
+-- refusing the whole paste with a specific reason rather than partially
+-- applying - identical "validate everything, then commit once" shape as
+-- every other mass operation in this file.
+local function paste_clipboard()
+  if not clipboard or #clipboard.entries == 0 then
+    flash_status("Clipboard is empty.")
+    return
   end
 
-  -- Nor can a selected note land on top of an existing, non-selected note
-  -- already on target_string.
-  local doomed_idx = {}
-  for _, note in ipairs(doomed) do doomed_idx[note.idx] = true end
-  for i = 1, #collision_events do
-    local notes = collision_events[i].notes
-    for j = 1, #notes do
-      local other = notes[j]
-      if other.string == target_string and not doomed_idx[other.idx] then
-        for _, note in ipairs(moves) do
-          if notes_overlap(other, note) then
-            return false, string.format("Can't move: string %d already has a note during that time.", target_display)
-          end
-        end
+  local cursor_tick = round(reaper.MIDI_GetPPQPosFromProjTime(target_take, reaper.GetCursorPosition()))
+
+  local placements = {}
+  for _, e in ipairs(clipboard.entries) do
+    local startppq = cursor_tick + e.rel_tick
+    placements[#placements + 1] = { startppq = startppq, endppq = startppq + e.duration_ticks, entry = e }
+  end
+
+  for i = 1, #placements do
+    local a = placements[i]
+    if string_occupied(a.entry.string, a.startppq, a.endppq, nil) then
+      flash_status(string.format(
+        "Can't paste: string %d already has a note there.", notation_model.display_string_number(config, a.entry.string)))
+      return
+    end
+    for j = i + 1, #placements do
+      local b = placements[j]
+      if a.entry.string == b.entry.string and notes_overlap(a, b) then
+        flash_status("Can't paste: two pasted notes would overlap on the same string.")
+        return
       end
     end
   end
 
   push_undo_snapshot(target_take)
   reaper.Undo_BeginBlock()
-  local map = midi_read.read_technique_map(target_take)
-  for _, note in ipairs(moves) do
-    local old_key = note.startppq .. ":" .. note.chan .. ":" .. note.pitch
-    local technique = map[old_key]
-    reaper.MIDI_SetNote(target_take, note.idx, nil, nil, nil, nil, target_string, nil, nil, nil)
-    if technique then
-      map[old_key] = nil
-      map[note.startppq .. ":" .. target_string .. ":" .. note.pitch] = technique
+  for _, p in ipairs(placements) do
+    reaper.MIDI_InsertNote(target_take, false, false, p.startppq, p.endppq, p.entry.string, p.entry.pitch, p.entry.vel, true)
+  end
+  finalize_midi_write(target_take)
+
+  local any_technique = false
+  for _, p in ipairs(placements) do
+    if p.entry.technique_id then any_technique = true; break end
+  end
+  if any_technique then
+    local map = midi_read.read_technique_map(target_take)
+    for _, p in ipairs(placements) do
+      if p.entry.technique_id then
+        map[p.startppq .. ":" .. p.entry.string .. ":" .. p.entry.pitch] = p.entry.technique_id
+      end
+    end
+    reaper.GetSetMediaItemTakeInfo_String(target_take, midi_read.TECH_EXT_KEY, midi_read.serialize_technique_map(map), true)
+    technique_changed = true
+  end
+  reaper.Undo_EndBlock(string.format("Paste %d notes (tab/notation viewer)", #placements), UNDO_ALL)
+
+  -- The just-pasted notes become the new selection - standard paste
+  -- convention (immediately movable/deletable/paste-again without a fresh
+  -- drag), and keyed the same "startppq:chan:pitch" way as everywhere else.
+  selected_notes = {}
+  for _, p in ipairs(placements) do
+    selected_notes[p.startppq .. ":" .. p.entry.string .. ":" .. p.entry.pitch] = true
+  end
+  flash_status(string.format("Pasted %d note%s", #placements, #placements == 1 and "" or "s"))
+end
+
+-- Deletes every note starting inside [start_tick, end_tick) (the measure a
+-- right-click landed on - see hovered_measure/context_menu_measure), then
+-- shifts every LATER note in this take left by the measure's own tick
+-- length, closing the gap - see header for why this only ever touches this
+-- take's note content, never REAPER's project tempo/time-signature map.
+--
+-- Idx bookkeeping mirrors mass_delete_selected's own reasoning (idx is
+-- strictly time-ordered after MIDI_Sort): every doomed note's idx is
+-- necessarily LOWER than every shifted note's idx (doomed starts before
+-- end_tick, shifted starts at or after it), so deleting all of them first,
+-- in descending idx order, only ever changes idx values already consumed -
+-- meaning every shifted note's PRE-delete idx minus #doomed is exactly its
+-- POST-delete idx, computed once up front rather than re-read after each
+-- delete. MIDI_SetNote (the shift itself) doesn't change the note count, so
+-- unlike delete it never renumbers anything else while the shift loop runs.
+local function delete_measure(start_tick, end_tick)
+  local measure_len = end_tick - start_tick
+  if measure_len <= 0 then return end
+
+  local doomed, shifted = {}, {}
+  for i = 1, #collision_events do
+    local notes = collision_events[i].notes
+    for j = 1, #notes do
+      local note = notes[j]
+      if note.startppq >= start_tick and note.startppq < end_tick then
+        doomed[#doomed + 1] = note
+      elseif note.startppq >= end_tick then
+        shifted[#shifted + 1] = note
+      end
     end
   end
+
+  if #doomed == 0 and #shifted == 0 then
+    flash_status("That measure is already empty.")
+    return
+  end
+
+  table.sort(doomed, function(a, b) return a.idx > b.idx end)
+
+  push_undo_snapshot(target_take)
+  reaper.Undo_BeginBlock()
+
+  local map = midi_read.read_technique_map(target_take)
+  for _, note in ipairs(doomed) do
+    map[note.startppq .. ":" .. note.chan .. ":" .. note.pitch] = nil
+  end
+  for _, note in ipairs(doomed) do
+    reaper.MIDI_DeleteNote(target_take, note.idx)
+  end
+
+  for _, note in ipairs(shifted) do
+    local old_key = note.startppq .. ":" .. note.chan .. ":" .. note.pitch
+    local technique = map[old_key]
+    local new_start = note.startppq - measure_len
+    reaper.MIDI_SetNote(target_take, note.idx - #doomed, nil, nil, new_start, note.endppq - measure_len, nil, nil, nil, true)
+    if technique then
+      map[old_key] = nil
+      map[new_start .. ":" .. note.chan .. ":" .. note.pitch] = technique
+    end
+  end
+
   reaper.GetSetMediaItemTakeInfo_String(target_take, midi_read.TECH_EXT_KEY, midi_read.serialize_technique_map(map), true)
   finalize_midi_write(target_take)
-  reaper.Undo_EndBlock(string.format("Move %d notes to string %d (tab/notation viewer)", #moves, target_display), UNDO_ALL)
+  reaper.Undo_EndBlock("Delete measure (tab/notation viewer)", UNDO_ALL)
   technique_changed = true
 
   selected_notes = {}
-  return true, nil
+  flash_status("Measure deleted")
 end
 
 local function commit_create(ctx)
@@ -1687,8 +1882,8 @@ local function draw_create_popup(ctx)
 
   local string_flags = reaper.ImGui_InputTextFlags_CharsDecimal()
 
-  -- Quick entry: optional "string.fret.duration" box (see
-  -- parse_quick_entry), e.g. "8.12.1/8+" or "8.12l.1/8+" for the same note
+  -- Quick entry: optional "string(fret)duration" box (see
+  -- parse_quick_entry), e.g. "8(12)1/8+" or "8(12l)1/8+" for the same note
   -- legato-flagged - a compact, mostly-numpad alternative to the three
   -- fields below. No CharsDecimal here (unlike String, below) - a fret's
   -- own technique suffix (l/t/lt/pm/ph - see strip_technique_suffix) needs
@@ -1699,7 +1894,7 @@ local function draw_create_popup(ctx)
     reaper.ImGui_SetKeyboardFocusHere(ctx)
     focus_create_quick_input = false
   end
-  local _, new_quick_text = reaper.ImGui_InputText(ctx, "Tab Code (string.fret.duration)", create_quick_buf)
+  local _, new_quick_text = reaper.ImGui_InputText(ctx, "Tab Code (string(fret)duration)", create_quick_buf)
   create_quick_buf = new_quick_text
   if reaper.ImGui_IsItemHovered(ctx) then
     reaper.ImGui_SetTooltip(ctx, quick_entry_tooltip_create())
@@ -1785,6 +1980,29 @@ local function draw_create_popup(ctx)
   end
 end
 
+-- Every OTHER string that can reach pitch at a playable fret (0..config.
+-- max_fret), excluding exclude_string_idx (the note's own current string -
+-- showing it as an "alternate" to itself would be redundant). Distinct
+-- from the String/Fret fields above, which let you retype ANY string/fret
+-- and change the note's pitch in the process (see commit_edit) - this only
+-- ever offers a substitution that keeps the note sounding EXACTLY the
+-- same pitch, computed via the same fret = pitch - tuning - capo math
+-- every read/write path in this app already uses, just surfaced here as
+-- one-click options for a single note instead of requiring the player to
+-- do the tuning arithmetic (or type a string number) by hand.
+local function alternate_strings_for_pitch(pitch, exclude_string_idx)
+  local out = {}
+  for s = 1, #config.tuning do
+    if s ~= exclude_string_idx then
+      local fret = pitch - config.tuning[s] - config.capo
+      if fret >= 0 and fret <= config.max_fret then
+        out[#out + 1] = { string_idx = s, fret = fret }
+      end
+    end
+  end
+  return out
+end
+
 local function draw_edit_popup(ctx)
   reaper.ImGui_Text(ctx, "Edit Note")
 
@@ -1797,14 +2015,14 @@ local function draw_edit_popup(ctx)
   -- fires).
   local string_flags = reaper.ImGui_InputTextFlags_CharsDecimal()
 
-  -- Quick entry: same "string.fret.duration" box as draw_create_popup,
+  -- Quick entry: same "string(fret)duration" box as draw_create_popup,
   -- overriding String/Fret/Duration below when non-blank (see commit_edit/
   -- parse_quick_entry).
   if focus_edit_quick_input then
     reaper.ImGui_SetKeyboardFocusHere(ctx)
     focus_edit_quick_input = false
   end
-  local _, new_quick_text = reaper.ImGui_InputText(ctx, "Tab Code (string.fret.duration)", edit_quick_buf)
+  local _, new_quick_text = reaper.ImGui_InputText(ctx, "Tab Code (string(fret)duration)", edit_quick_buf)
   edit_quick_buf = new_quick_text
   if reaper.ImGui_IsItemHovered(ctx) then
     reaper.ImGui_SetTooltip(ctx, quick_entry_tooltip_edit())
@@ -1835,16 +2053,64 @@ local function draw_edit_popup(ctx)
     reaper.ImGui_SetTooltip(ctx, fret_tooltip())
   end
 
+  -- Duration stays directly under Fret (String/Fret/Duration as one visual
+  -- group) - the "Same pitch on:" row below is a separate concern (a
+  -- shortcut for String/Fret, not part of the same fill-in-order), split
+  -- off with its own separator the same way the Tab Code quick-entry box
+  -- above is split from this group.
   local _, new_text = reaper.ImGui_InputText(ctx, "Duration (N, N/D, -N/D rest)", edit_duration_buf)
   edit_duration_buf = new_text
   if reaper.ImGui_IsItemHovered(ctx) then
     reaper.ImGui_SetTooltip(ctx, DURATION_TOOLTIP_EDIT)
   end
 
+  -- "Same pitch on:" - a distinct, one-click shortcut from the String/Fret
+  -- fields above (see alternate_strings_for_pitch's own comment): every
+  -- OTHER string that can play this exact note, each its own small button
+  -- that just fills in String/Fret above - Update still has to be clicked
+  -- separately to actually commit it, same as typing those fields by hand.
+  -- Wraps to a new row by hand (ImGui has no auto-wrap for a run of
+  -- buttons) using each button's own measured width, since an instrument
+  -- with many strings tuned close together can offer more alternates than
+  -- fit on one line.
+  if pending_edit then
+    local alternates = alternate_strings_for_pitch(pending_edit.note.pitch, pending_edit.note.string)
+    if #alternates > 0 then
+      reaper.ImGui_Separator(ctx)
+      reaper.ImGui_Text(ctx, "Same pitch on:")
+      local avail_w = reaper.ImGui_GetContentRegionAvail(ctx)
+      local row_x = 0
+      for idx, alt in ipairs(alternates) do
+        local label = string.format("Str %d (%s)", notation_model.display_string_number(config, alt.string_idx),
+          notation_model.display_fret_label(config, alt.fret))
+        local btn_w = reaper.ImGui_CalcTextSize(ctx, label) + ALT_STRING_BTN_PADDING
+        if idx > 1 then
+          if row_x + ALT_STRING_ITEM_SPACING + btn_w <= avail_w then
+            reaper.ImGui_SameLine(ctx)
+            row_x = row_x + ALT_STRING_ITEM_SPACING + btn_w
+          else
+            row_x = btn_w
+          end
+        else
+          row_x = btn_w
+        end
+        reaper.ImGui_PushID(ctx, alt.string_idx)
+        if reaper.ImGui_Button(ctx, label) then
+          edit_string_buf = tostring(notation_model.display_string_number(config, alt.string_idx))
+          edit_fret_buf = format_fret_with_technique(
+            alt.fret, note_technique(target_take, pending_edit.note), pending_edit.note.vel)
+        end
+        reaper.ImGui_PopID(ctx)
+      end
+    end
+  end
+
   if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Enter(), false) then
     commit_edit(ctx)
     return
   end
+
+  reaper.ImGui_Separator(ctx)
 
   if reaper.ImGui_Button(ctx, "Update") then
     commit_edit(ctx)
@@ -1864,56 +2130,6 @@ local function draw_edit_popup(ctx)
 
   if edit_status then
     reaper.ImGui_TextWrapped(ctx, edit_status)
-  end
-end
-
--- "Move to String" popup - opened from the right-click context menu on an
--- active selection (see M.end_frame). Stays open with a status message on
--- failure, same convention as the Create/Edit popups above, so the reason
--- try_move_selected_to_string refused is visible right where the user just
--- asked for the move, not a fire-and-forget action with no feedback.
-local function draw_move_popup(ctx)
-  local count = 0
-  for _ in pairs(selected_notes) do count = count + 1 end
-  reaper.ImGui_Text(ctx, string.format("Move %d selected note%s to string:", count, count == 1 and "" or "s"))
-
-  if focus_move_input then
-    reaper.ImGui_SetKeyboardFocusHere(ctx)
-    focus_move_input = false
-  end
-  local string_flags = reaper.ImGui_InputTextFlags_CharsDecimal()
-  local _, new_text = reaper.ImGui_InputText(ctx, "String", move_string_buf, string_flags)
-  move_string_buf = new_text
-
-  local function commit_move()
-    local target_display = tonumber(move_string_buf)
-    local ok, err = try_move_selected_to_string(target_display and round(target_display) or nil)
-    if ok then
-      move_status = nil
-      reaper.ImGui_CloseCurrentPopup(ctx)
-    else
-      move_status = err
-    end
-  end
-
-  if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Enter(), false) then
-    commit_move()
-    return
-  end
-
-  if reaper.ImGui_Button(ctx, "Move") then
-    commit_move()
-    return
-  end
-  reaper.ImGui_SameLine(ctx)
-  if reaper.ImGui_Button(ctx, "Cancel") then
-    move_status = nil
-    reaper.ImGui_CloseCurrentPopup(ctx)
-    return
-  end
-
-  if move_status then
-    reaper.ImGui_TextWrapped(ctx, move_status)
   end
 end
 
@@ -1950,14 +2166,21 @@ function M.end_frame(ctx)
     reaper.ImGui_OpenPopup(ctx, CREATE_POPUP_ID)
   end
 
-  -- Right-click anywhere (not just on a selected note - the selection
-  -- itself, not the click position, is what the menu acts on) opens a
-  -- small context menu offering mass delete as a discoverable click-only
-  -- alternative to the Delete key below. Gated the same way the Delete key
-  -- itself is - a live selection, no popup already open - and checked
-  -- BEFORE this frame's BeginPopup call, same OpenPopup-then-BeginPopup
-  -- ordering every other popup in this file already uses.
-  if next(selected_notes) and not popup_was_open and reaper.ImGui_IsMouseClicked(ctx, 1) then
+  -- Right-click anywhere opens a small context menu offering Copy/Paste/
+  -- Delete N Notes/Delete Measure/Clear Selection - a discoverable click-
+  -- only alternative to the Ctrl+C/Ctrl+V/Delete key shortcuts below.
+  -- Unlike the old version of this menu, available with NO selection at
+  -- all (Paste and Delete Measure both make sense with nothing selected -
+  -- see the context menu's own BeginDisabled gating just below for which
+  -- entries need what). context_menu_measure snapshots hovered_measure
+  -- (check_system's own per-frame "what's under the mouse right now") at
+  -- the exact moment of the click - by the time this menu's Selectable is
+  -- actually pressed, the mouse has moved onto the popup itself, so
+  -- Delete Measure can't just re-read hovered_measure fresh at THAT point.
+  -- Checked BEFORE this frame's BeginPopup call, same OpenPopup-then-
+  -- BeginPopup ordering every other popup in this file already uses.
+  if not popup_was_open and reaper.ImGui_IsMouseClicked(ctx, 1) then
+    context_menu_measure = hovered_measure
     reaper.ImGui_OpenPopup(ctx, CONTEXT_MENU_POPUP_ID)
   end
 
@@ -1975,47 +2198,53 @@ function M.end_frame(ctx)
 
   local context_open = reaper.ImGui_BeginPopup(ctx, CONTEXT_MENU_POPUP_ID)
   if context_open then
-    local count = 0
-    for _ in pairs(selected_notes) do count = count + 1 end
+    local count = selection_count()
+    local clip_count = clipboard and #clipboard.entries or 0
+
+    if count == 0 then reaper.ImGui_BeginDisabled(ctx) end
+    if reaper.ImGui_Selectable(ctx, string.format("Copy %d Note%s", count, count == 1 and "" or "s"), false) then
+      copy_selected()
+      reaper.ImGui_CloseCurrentPopup(ctx)
+    end
+    if count == 0 then reaper.ImGui_EndDisabled(ctx) end
+
+    if clip_count == 0 then reaper.ImGui_BeginDisabled(ctx) end
+    if reaper.ImGui_Selectable(ctx, "Paste at Edit Cursor", false) then
+      paste_clipboard()
+      reaper.ImGui_CloseCurrentPopup(ctx)
+    end
+    if clip_count == 0 then reaper.ImGui_EndDisabled(ctx) end
+
+    if count == 0 then reaper.ImGui_BeginDisabled(ctx) end
     if reaper.ImGui_Selectable(ctx, string.format("Delete %d Note%s", count, count == 1 and "" or "s"), false) then
       mass_delete_selected()
       reaper.ImGui_CloseCurrentPopup(ctx)
     end
-    if reaper.ImGui_Selectable(ctx, "Move to String...", false) then
-      -- Deferred to right after this popup's own EndPopup, below - opening
-      -- a second, unrelated popup while this one is still active on the
-      -- same frame isn't part of the OpenPopup-then-BeginPopup idiom every
-      -- other popup in this file follows, so this just flags the request
-      -- and lets the normal per-frame flow pick it up. Seeded from an
-      -- arbitrary selected note's own current string (any one of them - a
-      -- reasonable starting guess, not a source of truth) so the field
-      -- isn't just a blank "1" every time.
-      local seed = gather_selected_notes()[1]
-      move_string_buf = tostring(notation_model.display_string_number(config, (seed and seed.string) or 1))
-      move_status = nil
-      focus_move_input = true
-      open_move_popup = true
+    if count == 0 then reaper.ImGui_EndDisabled(ctx) end
+
+    reaper.ImGui_Separator(ctx)
+
+    -- Acts on context_menu_measure (see this frame's own OpenPopup call
+    -- above), NOT hovered_measure directly - the mouse has moved onto this
+    -- popup by the time a Selectable here is actually clicked.
+    if not context_menu_measure then reaper.ImGui_BeginDisabled(ctx) end
+    if reaper.ImGui_Selectable(ctx, "Delete Measure", false) then
+      delete_measure(context_menu_measure.start_tick, context_menu_measure.end_tick)
       reaper.ImGui_CloseCurrentPopup(ctx)
     end
+    if not context_menu_measure then reaper.ImGui_EndDisabled(ctx) end
+
+    if count == 0 then reaper.ImGui_BeginDisabled(ctx) end
     if reaper.ImGui_Selectable(ctx, "Clear Selection", false) then
       selected_notes = {}
       reaper.ImGui_CloseCurrentPopup(ctx)
     end
+    if count == 0 then reaper.ImGui_EndDisabled(ctx) end
+
     reaper.ImGui_EndPopup(ctx)
   end
 
-  if open_move_popup then
-    open_move_popup = false
-    reaper.ImGui_OpenPopup(ctx, MOVE_POPUP_ID)
-  end
-
-  local move_open = reaper.ImGui_BeginPopup(ctx, MOVE_POPUP_ID)
-  if move_open then
-    draw_move_popup(ctx)
-    reaper.ImGui_EndPopup(ctx)
-  end
-
-  popup_was_open = create_open or edit_open or context_open or move_open
+  popup_was_open = create_open or edit_open or context_open
 
   -- Drag-to-select overlay + mass delete (see check_system's rectangle
   -- hit-test and mass_delete_selected above) - drawn/handled here rather
@@ -2035,31 +2264,42 @@ function M.end_frame(ctx)
     local y0, y1 = math.min(drag_start_y, mouse_y), math.max(drag_start_y, mouse_y)
     reaper.ImGui_DrawList_AddRectFilled(draw_list, x0, y0, x1, y1, SELECTION_RECT_FILL)
     reaper.ImGui_DrawList_AddRect(draw_list, x0, y0, x1, y1, SELECTION_RECT_BORDER)
-  elseif next(selected_notes) and not popup_was_open then
-    if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Delete(), false) then
-      mass_delete_selected()
-    elseif reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape(), false) then
-      selected_notes = {}
-    else
-      -- Anchored near the mouse cursor, not a fixed window corner - this
-      -- window has no separate scrolling child region for the score (see
-      -- main.lua), so a fixed corner would sit on top of the settings UI
-      -- above the score content instead of over the score itself.
-      local count = 0
-      for _ in pairs(selected_notes) do count = count + 1 end
-      local text = string.format(
-        "%d note%s selected - Delete or right-click to remove, Esc to clear", count, count == 1 and "" or "s")
-      reaper.ImGui_DrawList_AddText(draw_list, mouse_x + 14, mouse_y + 14, SELECTION_HUD_COLOR, text)
+  elseif not popup_was_open then
+    if flash_message_frames > 0 then
+      -- Takes priority over the "N notes selected" HUD below - both would
+      -- otherwise want the same screen space (see flash_message's own
+      -- comment), and a just-fired Copy/Paste/Delete Measure result is more
+      -- relevant right now than the ongoing selection-count reminder.
+      flash_message_frames = flash_message_frames - 1
+      reaper.ImGui_DrawList_AddText(draw_list, mouse_x + 14, mouse_y + 14, SELECTION_HUD_COLOR, flash_message)
+      if flash_message_frames == 0 then flash_message = nil end
+    elseif next(selected_notes) then
+      if reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Delete(), false) then
+        mass_delete_selected()
+      elseif reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Escape(), false) then
+        selected_notes = {}
+      else
+        -- Anchored near the mouse cursor, not a fixed window corner - this
+        -- window has no separate scrolling child region for the score (see
+        -- main.lua), so a fixed corner would sit on top of the settings UI
+        -- above the score content instead of over the score itself.
+        local text = string.format(
+          "%d note%s selected - Delete/Ctrl+C/right-click, Esc to clear", selection_count(),
+          selection_count() == 1 and "" or "s")
+        reaper.ImGui_DrawList_AddText(draw_list, mouse_x + 14, mouse_y + 14, SELECTION_HUD_COLOR, text)
+      end
     end
   end
 
-  -- Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y as the common Windows alias for redo) -
-  -- see push_undo_snapshot/do_undo/do_redo's own comment for why this
-  -- exists instead of relying on REAPER's native undo. Gated on no popup
-  -- being open, same reasoning as the Delete/Escape handling above, but
-  -- for a different hazard: Dear ImGui's own InputText has its own
-  -- built-in Ctrl+Z for in-progress typing, and this shouldn't shadow that
-  -- while a Fret/String/Duration/Tab Code field is focused.
+  -- Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y as the common Windows alias for redo),
+  -- Ctrl+C (copy_selected)/Ctrl+V (paste_clipboard) - see push_undo_
+  -- snapshot/do_undo/do_redo's own comment for why undo/redo exists
+  -- instead of relying on REAPER's native undo, and copy_selected/paste_
+  -- clipboard's own comments for the copy/paste mechanism itself. Gated on
+  -- no popup being open, same reasoning throughout this file: Dear ImGui's
+  -- own InputText has its own built-in Ctrl+Z/Ctrl+C/Ctrl+V for in-progress
+  -- typing, and none of this should shadow that while a Fret/String/
+  -- Duration/Tab Code field is focused.
   if not popup_was_open then
     local mods = reaper.ImGui_GetKeyMods(ctx)
     local ctrl_down = (mods & reaper.ImGui_Mod_Ctrl()) ~= 0
@@ -2068,6 +2308,10 @@ function M.end_frame(ctx)
       if shift_down then do_redo() else do_undo() end
     elseif ctrl_down and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_Y(), false) then
       do_redo()
+    elseif ctrl_down and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_C(), false) then
+      copy_selected()
+    elseif ctrl_down and reaper.ImGui_IsKeyPressed(ctx, reaper.ImGui_Key_V(), false) then
+      paste_clipboard()
     end
   end
 

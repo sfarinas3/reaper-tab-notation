@@ -78,6 +78,23 @@ M.color_fg = 0xFFFFFFFF
 -- no per-take save.
 M.show_note_names = false
 
+-- "Show String/Fret" cheat-sheet toggle (ui_chrome.lua, next to Show Note
+-- Names) - when on, draw_notation.lua prints each real note's "string(fret)"
+-- position (e.g. "1(5)" for string 1, fret 5) directly on the NOTATION
+-- staff only - the tab staff already shows this natively via its own fret
+-- numbers, so it would be redundant there. Same font/positioning
+-- convention as show_note_names (below a stem-up note, above a stem-down
+-- one; to the left for a chord) - see draw_notation.lua's pending_note_
+-- names for the shared mechanism. Combinable with show_note_names: when
+-- both are on, draw_notation.lua concatenates them into one
+-- "string(fret)name" label (e.g. "1(5)A4") instead of either replacing
+-- the other. Also the exact same notation this app's own Tab Code
+-- quick-entry box uses (tab_editor.lua's parse_quick_entry), so a value
+-- read off the score can be typed back in verbatim. A global display
+-- preference like show_note_names, same persistence (global ExtState
+-- fallback only, no per-take save).
+M.show_string_fret = false
+
 -- Grid line overlay (main.lua/src/grid_overlay.lua) - faint vertical lines
 -- through both staves at a fixed rhythmic subdivision, click-to-seek in
 -- the gap between them (see grid_overlay.lua's own header). A global
@@ -188,16 +205,35 @@ M.weights = {
   tap_position_change_weight = 0.05,
 }
 
--- Shared layout constants (layout_engine.lua, draw_tab.lua, draw_notation.lua).
-M.layout = {
-  ppq_per_quarter = 960,  -- REAPER's MIDI API tick resolution (MIDI_GetNote positions)
+-- Magnification (ui_chrome.lua's "Zoom" control) - 1.0 is this app's
+-- original, unscaled look. Applied by scaling every PIXEL-domain field of
+-- M.layout_base below into M.layout (see M.apply_zoom) - every drawer in
+-- this app (layout_engine.lua, draw_tab.lua, draw_notation.lua, tab_
+-- editor.lua, note_editor.lua, measure_correction.lua) already reads
+-- config.layout.* fresh on every call rather than caching it once, so
+-- rescaling M.layout's fields in place (not replacing the table itself)
+-- takes effect immediately everywhere with no cache to invalidate. Text
+-- size is handled separately, via a PushFont(ctx, nil, base_size * zoom)/
+-- PopFont pair around the score child window (see main.lua) - a font has no
+-- "pixel size" of its own in config.layout to scale. A global display
+-- preference like show_note_names, not an
+-- instrument/tuning property - persisted via the same global ExtState
+-- fallback, no per-take save.
+M.zoom = 1.0
+
+-- Authored, NEVER-scaled defaults - M.layout (below) is derived from this
+-- plus M.zoom every time either changes (M.apply_zoom). Keep this table
+-- as the one place these numbers are hand-tuned; M.layout itself is a
+-- computed cache, not a second source of truth.
+M.layout_base = {
+  ppq_per_quarter = 960,  -- REAPER's MIDI API tick resolution (MIDI_GetNote positions) - a TICK count, not a pixel size, so this is one of the fields M.apply_zoom copies through unscaled
 
   min_gap = 6,            -- minimum pixels between adjacent events' rendered content
   left_margin = 90,       -- room for the clef (every system) + time signature (first system, and wherever it changes) + a clear gap before the first note
   right_margin = 24,
   line_height = 14,       -- vertical spacing between tab staff lines
 
-  notation_line_spacing = 8, -- px between adjacent notation staff lines (half of this per diatonic step)
+  notation_line_spacing = 9, -- px between adjacent notation staff lines (half of this per diatonic step)
   notehead_radius = 3,
   stem_length = 24,
   staff_gap = 26,         -- px gap between the notation staff and the tab staff below it
@@ -217,19 +253,23 @@ M.layout = {
   -- scrape, not a real pitch) get pinned on the notation staff, instead
   -- of wherever their raw MIDI pitch would otherwise land. One global
   -- default for now; a per-note override is a natural Phase 5 UI addition.
+  -- A diatonic STEP count, not a pixel size - copied through unscaled.
   x_notehead_offset = 0,
 
   -- Which string (config.tuning's 1-based convention) the same notes get
   -- pinned to on the tab staff, shown as "x" text instead of a fret
   -- number. Also one global default for now, also a natural per-note
-  -- override for Phase 5.
+  -- override for Phase 5. A string INDEX, not a pixel size - copied
+  -- through unscaled.
   x_notehead_string = 1,
 
   -- Duration-class width table, roughly logarithmic so short-note passages
   -- don't become absurdly wide. width_for_duration() interpolates between
   -- entries in log-tick space; ticks are in ppq_per_quarter units. Also
   -- used by notation_model.detect_rests to classify a timeline gap into
-  -- the largest standard rest that fits.
+  -- the largest standard rest that fits. Only each entry's width is a
+  -- pixel size (scaled); ticks is a rhythm-domain value (copied through
+  -- unscaled) - see M.apply_zoom.
   duration_classes = {
     { ticks = 60,   width = 14 },  -- 64th
     { ticks = 120,  width = 19 },  -- 32nd
@@ -240,5 +280,44 @@ M.layout = {
     { ticks = 3840, width = 112 }, -- whole
   },
 }
+
+-- Fields of M.layout_base that are pixel sizes - the only ones M.apply_zoom
+-- multiplies by M.zoom. Everything else in M.layout_base (ppq_per_quarter,
+-- x_notehead_offset, x_notehead_string, duration_classes[i].ticks) lives in
+-- a different domain (rhythm ticks, diatonic steps, a string index) that
+-- magnification has no business touching.
+local ZOOM_PIXEL_FIELDS = {
+  "min_gap", "left_margin", "right_margin", "line_height",
+  "notation_line_spacing", "notehead_radius", "stem_length",
+  "staff_gap", "system_gap",
+}
+
+M.layout = {}
+
+-- Recomputes M.layout from M.layout_base * M.zoom - call once at startup
+-- (done below) and again any time M.zoom changes (ui_chrome.lua's Zoom
+-- control does this immediately on every change, the same "no cache to
+-- invalidate" convention config.lua's other live-editable fields already
+-- follow). Mutates M.layout's existing fields rather than replacing the
+-- table object, so a `local layout = config.layout` alias anywhere would
+-- keep seeing live values too - though nothing in this codebase actually
+-- does that; every caller reads config.layout.<field> fresh each time.
+function M.apply_zoom()
+  local z = M.zoom or 1.0
+  for _, k in ipairs(ZOOM_PIXEL_FIELDS) do
+    M.layout[k] = M.layout_base[k] * z
+  end
+  M.layout.ppq_per_quarter = M.layout_base.ppq_per_quarter
+  M.layout.x_notehead_offset = M.layout_base.x_notehead_offset
+  M.layout.x_notehead_string = M.layout_base.x_notehead_string
+
+  local classes = {}
+  for i, c in ipairs(M.layout_base.duration_classes) do
+    classes[i] = { ticks = c.ticks, width = c.width * z }
+  end
+  M.layout.duration_classes = classes
+end
+
+M.apply_zoom()
 
 return M

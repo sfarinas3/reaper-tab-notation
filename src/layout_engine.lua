@@ -102,6 +102,15 @@ M.PPQ_PER_QUARTER = config.layout.ppq_per_quarter
 local GRACE_NOTE_TICKS = M.PPQ_PER_QUARTER / 32 -- half of a 64th note - config.layout.duration_classes' own shortest real class
 local GRACE_NOTE_WIDTH = 10 -- px - a small fixed width, not duration-proportional
 
+-- Fallback only, when the caller doesn't pass opts.measure_start_buffer -
+-- see M.compute's own comment on that option for the real, CALCULATED
+-- value (draw_tab.lua's M.measure_start_buffer, measured with CalcTextSize
+-- against the actual active font/size) that every real caller supplies.
+-- This fixed number only covers a caller with no ImGui context at all
+-- (there are none today, but M.compute shouldn't hard-require one).
+local MEASURE_START_BUFFER_FALLBACK = 36 -- px
+local MEASURE_START_TOLERANCE = 5 -- ticks - real MIDI timing imprecision on an intended downbeat
+
 -- Guitar technique ids for a legato (hammer-on/pull-off) tag - source of
 -- truth is tab_editor.lua's own GUITAR_TECHNIQUE_LEGATO/_LEGATO_TAP (the
 -- "l"/"lt" fret suffixes write these ids into midi_read.lua's technique
@@ -256,6 +265,17 @@ function M.compute(events, opts)
   local measure_ticks = opts.measure_ticks
   local min_gap = config.layout.min_gap
   local x = config.layout.left_margin
+  -- Space reserved right after a barline, before that measure's own first
+  -- event - standing, not conditional on config.show_note_names, so
+  -- toggling that checkbox never shifts the layout. Exists specifically so
+  -- draw_tab.lua's "Show Note Names" cheat sheet, which draws a chord's
+  -- names to the LEFT of its fret numbers rather than below (see that
+  -- file's header), has somewhere to put them when the chord lands right
+  -- on beat 1 - the one spot a leftward label would otherwise have nothing
+  -- but a barline immediately behind it. draw_tab.lua's M.measure_start_
+  -- buffer calculates this from real measured text, not a guess - see
+  -- that function's own header for exactly what it accounts for.
+  local measure_start_buffer = opts.measure_start_buffer or MEASURE_START_BUFFER_FALLBACK
 
   local result = {}
   local prev_by_string = {} -- string index -> last note seen on that string, for tie detection
@@ -279,7 +299,12 @@ function M.compute(events, opts)
   -- Appends one render-model entry (advancing x by its own duration-class
   -- width, or GRACE_NOTE_WIDTH for a grace note - see this file's header)
   -- and returns it, so the caller can chain barline-split segments.
-  local function emit(tick, duration_ticks, notes)
+  -- extra_spacing_ticks (optional, default 0): added to the SPACING
+  -- calculation only, never to notated_ticks itself, so it never affects
+  -- this entry's own notehead/flag/dot classification - just reserves
+  -- extra trailing width for silence that follows before the next real
+  -- event (see this event's own trailing_rest_ticks, above).
+  local function emit(tick, duration_ticks, notes, extra_spacing_ticks)
     local is_grace = duration_ticks < GRACE_NOTE_TICKS
     local tuplet = tuplet_lookup and tuplet_lookup(tick)
     local notated_ticks = (tuplet and tuplet.nominal_ticks) or duration_ticks
@@ -287,7 +312,8 @@ function M.compute(events, opts)
       notes = notes, is_grace = is_grace, tuplet = tuplet }
     result[#result + 1] = entry
     local content_width = measure_width and measure_width(entry) or 0
-    local base_width = is_grace and GRACE_NOTE_WIDTH or width_for_duration(notated_ticks)
+    local spacing_ticks = notated_ticks + (extra_spacing_ticks or 0)
+    local base_width = is_grace and GRACE_NOTE_WIDTH or width_for_duration(spacing_ticks)
     local step_width = math.max(base_width, content_width + min_gap)
     x = x + step_width
     return entry
@@ -295,6 +321,35 @@ function M.compute(events, opts)
 
   for e = 1, #events do
     local event = events[e]
+
+    -- Measure-start buffer (see measure_start_buffer's own comment above) -
+    -- added once, right before this event's own x is used for anything,
+    -- whenever this event's tick sits on (or within real-MIDI-timing
+    -- tolerance of) a measure boundary, i.e. this is that measure's own
+    -- first event. pending_measure_boundary_x remembers x as it was BEFORE
+    -- the buffer, so the render-model entry this event turns into (below)
+    -- can carry the barline's own true x separately from its own (now
+    -- pushed-right) x - see that entry's own measure_boundary_x field and
+    -- M.wrap_into_systems' matching comment for why they have to differ:
+    -- without this, the barline's OWN x is computed (in wrap_into_systems)
+    -- by interpolating measure_ticks against this same render model, which
+    -- lands EXACTLY on this event's own x whenever a note starts right on
+    -- the downbeat (the boundary tick and the note's tick are identical) -
+    -- so the buffer above, which only pushes the NOTE right, was silently
+    -- carrying the barline right along with it and never actually opening
+    -- any gap between them, a real bug an earlier version of this buffer
+    -- had (visually, the note's own leftward name still landed right on
+    -- the barline no matter how large the buffer was).
+    local pending_measure_boundary_x = nil
+    if measure_ticks then
+      for i = 1, #measure_ticks do
+        if math.abs(measure_ticks[i] - event.tick) <= MEASURE_START_TOLERANCE then
+          pending_measure_boundary_x = x
+          x = x + measure_start_buffer
+          break
+        end
+      end
+    end
 
     local duration_ticks = nil
     for i = 1, #event.notes do
@@ -312,12 +367,28 @@ function M.compute(events, opts)
     -- that a note's written value reflects the time until the next onset,
     -- not its own release. A no-op for the ordinary (non-overlapping)
     -- case, where the raw duration is already <= this gap.
+    --
+    -- full_gap_ticks (the UNCAPPED gap) is kept separately - trailing_rest_
+    -- ticks below is how much of that gap this note's own written value
+    -- does NOT cover, i.e. how much silence (notation_model.detect_rests'
+    -- own job to fill with rest symbols) follows before the next real
+    -- event. That silence has no entry of its own in this render model -
+    -- rests are synthesized entirely separately, purely by interpolating
+    -- onto the x-positions notes establish here - so without accounting
+    -- for it, a short note followed by a long rest reserved only its own
+    -- short duration's worth of width, and the rest (plus, at a measure
+    -- end, the barline itself) had to be interpolated into that same
+    -- cramped gap: a once-reported real bug where a half rest ended up
+    -- visually crushed against both the preceding note and the barline.
+    -- See emit's own extra_spacing_ticks param for where this is spent.
+    local full_gap_ticks = events[e + 1] and (events[e + 1].tick - event.tick) or duration_ticks
     if events[e + 1] then
-      local gap = events[e + 1].tick - event.tick
+      local gap = full_gap_ticks
       if gap > 0 and gap < duration_ticks then
         duration_ticks = gap
       end
     end
+    local trailing_rest_ticks = math.max(0, full_gap_ticks - duration_ticks)
 
     local notes = {}
     for i = 1, #event.notes do
@@ -360,20 +431,63 @@ function M.compute(events, opts)
     end
 
     -- Split across any barlines this notated span crosses (see this
-    -- file's header) - the ordinary, non-crossing case is just one
-    -- segment covering the whole duration, identical to before.
-    local crossings = crossings_within(event.tick, event.tick + duration_ticks)
-    local seg_start = event.tick
+    -- file's header), then further decompose each of those barline-bounded
+    -- segments into tied-together legal note values wherever a segment's
+    -- own duration doesn't correspond to a single plain/dotted value
+    -- (notation_model.decompose_duration - the same beat-aware largest-
+    -- fits-first algorithm notation_model.detect_rests already uses for
+    -- rests, applied here so e.g. a 2.5-beat note renders as a half tied to
+    -- an eighth instead of a half note that silently truncates the last
+    -- eighth away with no visual trace of it). Skipped for a detected
+    -- tuplet member: its raw duration_ticks is already a complete,
+    -- correctly-classified value via notated_ticks' nominal-ticks
+    -- substitution (see emit above and has_clean_duration's own TUPLET_
+    -- SCALE_FACTORS reasoning) - running the plain/dotted classifier
+    -- against a tuplet-scaled raw tick count would misclassify it.
+    -- decompose_duration can return no pieces at all for a span below the
+    -- smallest recognized class (a grace note, or a barline-split fragment
+    -- too short to classify) - falls back to the original undecomposed
+    -- span in that case. The ordinary (non-crossing, cleanly-classifiable)
+    -- case is still just one piece covering the whole duration, identical
+    -- to before.
+    local pieces = {}
+    do
+      local crossings = crossings_within(event.tick, event.tick + duration_ticks)
+      local seg_start = event.tick
+      for c = 1, #crossings + 1 do
+        local seg_end = crossings[c] or (event.tick + duration_ticks)
+        local seg_len = seg_end - seg_start
+
+        local sub_pieces = nil
+        if not (tuplet_lookup and tuplet_lookup(seg_start)) then
+          local mi = measure_ticks and notation_model.measure_index_for(measure_ticks, seg_start)
+          local measure_start = mi and measure_ticks[mi]
+          sub_pieces = notation_model.decompose_duration(seg_start, seg_len, measure_start, beat_ticks_lookup)
+        end
+        if not sub_pieces or #sub_pieces == 0 then
+          sub_pieces = { { tick = seg_start, duration_ticks = seg_len } }
+        end
+        for _, p in ipairs(sub_pieces) do
+          pieces[#pieces + 1] = p
+        end
+
+        seg_start = seg_end
+      end
+    end
+
     local seg_notes = notes
-    for c = 1, #crossings + 1 do
-      local seg_end = crossings[c] or (event.tick + duration_ticks)
-      local is_last = c > #crossings
+    for c = 1, #pieces do
+      local piece = pieces[c]
+      local is_last = c == #pieces
 
       if not is_last then
         for i = 1, #seg_notes do seg_notes[i].tied_to_next = true end
       end
 
-      emit(seg_start, seg_end - seg_start, seg_notes)
+      local entry = emit(piece.tick, piece.duration_ticks, seg_notes, is_last and trailing_rest_ticks or nil)
+      if c == 1 and pending_measure_boundary_x then
+        entry.measure_boundary_x = pending_measure_boundary_x
+      end
 
       if not is_last then
         local next_notes = {}
@@ -385,7 +499,6 @@ function M.compute(events, opts)
           next_notes[i] = copy
         end
         seg_notes = next_notes
-        seg_start = seg_end
       end
     end
   end
@@ -537,9 +650,24 @@ function M.wrap_into_systems(render_model, measure_ticks, max_width)
     }
   end
 
+  -- tick -> measure_boundary_x override (see M.compute's own pending_
+  -- measure_boundary_x comment for why this has to differ from the plain
+  -- tick-interpolated position): whenever a note starts right on a
+  -- downbeat, its own tick exactly equals that measure's boundary tick, so
+  -- M.x_for_tick would otherwise place the barline at that SAME (buffer-
+  -- pushed) x, closing the gap the buffer was supposed to open. At most
+  -- one entry per tick in practice (only a measure's own first event ever
+  -- sets this).
+  local measure_boundary_x_override = {}
+  for i = 1, #render_model do
+    if render_model[i].measure_boundary_x then
+      measure_boundary_x_override[render_model[i].tick] = render_model[i].measure_boundary_x
+    end
+  end
+
   local boundary_x = {}
   for i = 1, #measure_ticks do
-    boundary_x[i] = M.x_for_tick(render_model, measure_ticks[i])
+    boundary_x[i] = measure_boundary_x_override[measure_ticks[i]] or M.x_for_tick(render_model, measure_ticks[i])
   end
 
   local n_measures = #measure_ticks - 1

@@ -174,6 +174,7 @@ local PH_ABOVE_GAP = 4 -- px between the "P.H." label and the fret number's own 
 local GUITAR_TECHNIQUE_TAP = 102
 local GUITAR_TECHNIQUE_LEGATO_TAP = 103
 local NOTE_NAME_GAP = 4 -- px between a label's own right edge and its "Show Note Names" cheat-sheet text
+local NOTE_NAME_FONT_DELTA = 1 -- pt smaller than the base font the "Show Note Names" cheat-sheet text renders at, matching draw_notation.lua's identical treatment (see that file's own comment)
 
 -- "Let ring" marking: a dashed horizontal line from a note's own position
 -- out to where its actual MIDI sustain (endppq) really ends - see this
@@ -280,6 +281,77 @@ function M.make_measurer(ctx)
     end
     return max_w
   end
+end
+
+-- Widest realistic fret label and note name this app can actually
+-- produce, for M.measure_start_buffer below. Fret labels: plain numbers up
+-- to config.max_fret ("24"), plus Shamisen's tsubo labels, which can carry
+-- their own octave-count prefix and #/b suffix (see notation_model.
+-- display_fret_label) - "1b"/"1#"/"19" cover the widest those get within
+-- a realistic max_fret. Note names (notation_model.pitch_to_name): a
+-- sharp-letter name plus octave digit(s), including the rare but real
+-- negative-octave case for a very low pitch ("C#-1" at MIDI pitch 1).
+-- Measuring a short representative SET rather than looping every fret/
+-- pitch - all of these render at the same fixed-width-ish digit/letter
+-- glyphs, so the true worst case is one of these, not something in between.
+local WIDEST_FRET_LABELS = { "24", "20", "19", "1b", "1#" }
+local WIDEST_NOTE_NAMES = { "C#-1", "G#9", "A#0" }
+
+-- Widest realistic combined "string(fret)name" annotation (draw_notation.
+-- lua's Show Note Names + Show String/Fret both on at once) - every
+-- WIDEST_FRET_LABELS entry glued onto every WIDEST_NOTE_NAMES entry,
+-- prefixed with "9" for the string digit (this app's own tunings never go
+-- past single digits in practice, and this buffer only needs to be AT
+-- LEAST as wide as the true worst case, not exact).
+local WIDEST_COMBINED = {}
+for _, label in ipairs(WIDEST_FRET_LABELS) do
+  for _, name in ipairs(WIDEST_NOTE_NAMES) do
+    WIDEST_COMBINED[#WIDEST_COMBINED + 1] = "9(" .. label .. ")" .. name
+  end
+end
+
+-- Calculated (not guessed) minimum buffer layout_engine.compute reserves
+-- right after every barline (opts.measure_start_buffer) - see that file's
+-- own comment on the option for why: a chord landing on beat 1, with "Show
+-- Note Names"/"Show String/Fret" on, needs somewhere to put its leftward
+-- annotation (this file's own chord note-name placement, below, and draw_
+-- notation.lua's identical treatment on the score) without reaching back
+-- across the barline. Measured with CalcTextSize against whatever font/
+-- size is actually active, so it tracks a real font-size change
+-- automatically instead of needing hand-tuning. Only HALF the fret
+-- label's own width counts, plus one NOTE_NAME_GAP, plus the full
+-- annotation width - exactly mirroring the chord-name draw call's own
+-- math (x - w / 2 - NOTE_NAME_GAP - nw) run backwards from x, since that
+-- label is centered on the note's own x while the annotation sits
+-- entirely to its left. The annotation half (note name / string-fret /
+-- both combined) is measured at NOTE_NAME_FONT_DELTA pt smaller, matching
+-- what actually gets drawn (see that constant's own comment) - the fret
+-- label half is NOT, since fret numbers themselves always render at full
+-- size. EXTRA_BREATHING_ROOM is a small, deliberately-fixed margin on top
+-- of that exact figure, purely so the annotation doesn't render flush
+-- against the barline itself.
+local MEASURE_START_EXTRA_BREATHING_ROOM = 6 -- px
+function M.measure_start_buffer(ctx)
+  local widest_fret_w = 0
+  for _, label in ipairs(WIDEST_FRET_LABELS) do
+    local w = reaper.ImGui_CalcTextSize(ctx, label)
+    if w > widest_fret_w then widest_fret_w = w end
+  end
+
+  local base_size = reaper.ImGui_GetFontSize(ctx)
+  reaper.ImGui_PushFont(ctx, nil, base_size - NOTE_NAME_FONT_DELTA)
+  local widest_annotation_w = 0
+  for _, name in ipairs(WIDEST_NOTE_NAMES) do
+    local w = reaper.ImGui_CalcTextSize(ctx, name)
+    if w > widest_annotation_w then widest_annotation_w = w end
+  end
+  for _, combo in ipairs(WIDEST_COMBINED) do
+    local w = reaper.ImGui_CalcTextSize(ctx, combo)
+    if w > widest_annotation_w then widest_annotation_w = w end
+  end
+  reaper.ImGui_PopFont(ctx)
+
+  return widest_fret_w / 2 + NOTE_NAME_GAP + widest_annotation_w + MEASURE_START_EXTRA_BREATHING_ROOM
 end
 
 -- Draws the tab staff for render_model (layout_engine.compute's output)
@@ -399,6 +471,19 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, beat_ticks_loo
       end
     end
 
+    -- Chord size (real fretted/open notes only, not an "x" mute) - see the
+    -- "Show Note Names" cheat sheet below for why this matters: below each
+    -- fret number is fine for a single note, but a chord stacks several
+    -- names down the same narrow line_height rows a chord's OWN fret
+    -- numbers already occupy, easily crowding into the next string's own
+    -- number. Counted once per event rather than inline in the per-note
+    -- loop below since every note in the event needs to know the SAME
+    -- total, not just how many it's seen so far.
+    local chord_note_count = 0
+    for j = 1, #event.notes do
+      if event.notes[j].string then chord_note_count = chord_note_count + 1 end
+    end
+
     for j = 1, #event.notes do
       local note = event.notes[j]
       local string_idx = note.string or config.layout.x_notehead_string
@@ -415,20 +500,42 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, beat_ticks_loo
       local label_end_x = x + w / 2
 
       -- "Show Note Names" cheat sheet (config.show_note_names) - see this
-      -- file's header. Centered directly below the fret number rather than
-      -- beside it, matching draw_notation.lua's own note-name placement
-      -- convention. below_y tracks the next free y below the number - every
-      -- other below-the-number marking (Shamisen's duration dashes/
-      -- technique glyph, guitar's P.M. label/dashes) starts from below_y
-      -- instead of a fixed y + h / 2, so the name and whichever technique
-      -- marking a note also happens to carry stack cleanly instead of
-      -- overlapping.
+      -- file's header. A single note gets its name centered directly below
+      -- the fret number, matching draw_notation.lua's own convention.
+      -- below_y tracks the next free y below the number - every other
+      -- below-the-number marking (Shamisen's duration dashes/technique
+      -- glyph, guitar's P.M. label/dashes) starts from below_y instead of a
+      -- fixed y + h / 2, so the name and whichever technique marking a
+      -- note also happens to carry stack cleanly instead of overlapping.
+      --
+      -- A CHORD (chord_note_count > 1) instead gets its names to the LEFT
+      -- of the fret numbers, one per string row at that row's own y: below-
+      -- placement stacks every chord member's name down the same narrow
+      -- line_height rows the chord's own fret numbers already occupy
+      -- (guitar/bass tunings routinely run line_height much tighter than a
+      -- name's own text height), so a chord's names ran together and often
+      -- crowded into the next string's own fret number - illegible exactly
+      -- when there's the most to read. Left-placement uses horizontal room
+      -- instead, which layout_engine.lua's MEASURE_START_BUFFER specifically
+      -- keeps clear at the start of every measure for a chord landing right
+      -- on beat 1. Doesn't advance below_y - a chord's other below-the-
+      -- number markings (duration dashes, P.M.) still start right under the
+      -- number, unaffected by a name that isn't there anymore.
       local below_y = y + h / 2
       if config.show_note_names and note.string then
+        -- Rendered NOTE_NAME_FONT_DELTA pt smaller than the fret number
+        -- above it - see this constant's own comment.
+        local base_size = reaper.ImGui_GetFontSize(ctx)
+        reaper.ImGui_PushFont(ctx, nil, base_size - NOTE_NAME_FONT_DELTA)
         local name = notation_model.pitch_to_name(note.pitch)
         local nw, nh = reaper.ImGui_CalcTextSize(ctx, name)
-        reaper.ImGui_DrawList_AddText(draw_list, x - nw / 2, below_y + NOTE_NAME_GAP, COLOR_NOTE_NAME, name)
-        below_y = below_y + NOTE_NAME_GAP + nh
+        if chord_note_count > 1 then
+          reaper.ImGui_DrawList_AddText(draw_list, x - w / 2 - NOTE_NAME_GAP - nw, y - nh / 2, COLOR_NOTE_NAME, name)
+        else
+          reaper.ImGui_DrawList_AddText(draw_list, x - nw / 2, below_y + NOTE_NAME_GAP, COLOR_NOTE_NAME, name)
+          below_y = below_y + NOTE_NAME_GAP + nh
+        end
+        reaper.ImGui_PopFont(ctx)
       end
 
       if note.string and note.tied_from_prev and last_x_by_string[note.string] then
@@ -527,10 +634,17 @@ function M.draw(ctx, draw_list, origin_x, origin_y, render_model, beat_ticks_loo
       -- get a redundant let-ring line - see draw_notation.lua's matching
       -- guard for the full reasoning. Same cross-system limitation as
       -- draw_notation.lua's version: only checked against the immediately
-      -- following event.
+      -- following event. Capped at LET_RING_GAP shy of the next note's own
+      -- x, mirroring the gap already left at the START of this line (next
+      -- to this note's own label) - without it, note.endppq can map at or
+      -- past the next note's exact position (its sustain audibly overlaps
+      -- the next attack), which reads as "the next note rings too," not
+      -- "this note rings into the next one."
       if note.string and note.endppq and not note.tied_to_next
           and render_model[i + 1] and note.endppq > render_model[i + 1].tick then
         local ring_end_x = origin_x + layout_engine.x_for_tick(render_model, note.endppq)
+        local next_x = origin_x + render_model[i + 1].x
+        ring_end_x = math.min(ring_end_x, next_x - LET_RING_GAP)
         draw_let_ring_line(draw_list, label_end_x + LET_RING_GAP, ring_end_x, y)
       end
 

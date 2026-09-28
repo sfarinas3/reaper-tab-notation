@@ -805,6 +805,7 @@ local function measure_index_for(measure_ticks, t)
   end
   return idx
 end
+M.measure_index_for = measure_index_for -- exposed for layout_engine.compute's own note-tie decomposition
 
 -- Detects gaps in render_model's timeline - a note-event ending before the
 -- next one starts, or before the first note if leading_tick is given (e.g.
@@ -813,14 +814,14 @@ end
 -- duration rest symbols (see add_gap below) that together account for the
 -- gap's full length, not just a single symbol that may fall short. Each
 -- step of that sequence picks the largest standard duration (a plain
--- class, or that class's own dotted/1.5x equivalent - see classify below)
--- that fits the remaining, not-yet-covered part of the gap, then repeats
--- on whatever's left - e.g. 2.5 beats of silence becomes a half rest (2
--- beats) followed by an eighth rest (0.5 beats), not a single half rest
--- that silently drops the last eighth. Only stops leaving a genuine
--- remainder when what's left is smaller than the smallest recognized
--- class (a 64th note) - real MIDI timing imprecision, not an actual
--- fraction of a beat going unaccounted for.
+-- class, or that class's own dotted/1.5x equivalent - see M.decompose_
+-- duration below) that fits the remaining, not-yet-covered part of the
+-- gap, then repeats on whatever's left - e.g. 2.5 beats of silence becomes
+-- a half rest (2 beats) followed by an eighth rest (0.5 beats), not a
+-- single half rest that silently drops the last eighth. Only stops leaving
+-- a genuine remainder when what's left is smaller than the smallest
+-- recognized class (a 64th note) - real MIDI timing imprecision, not an
+-- actual fraction of a beat going unaccounted for.
 --
 -- Beat-boundary-aware spelling (beat_ticks_lookup, optional - same
 -- function(tick) -> beat_ticks signature M.beat_ticks_lookup/M.group_beams
@@ -879,34 +880,88 @@ end
 -- using measure_ticks' full span.
 -- Returns a list of {tick, duration_ticks, whole_measure}.
 local REST_BEAT_ALIGN_TOLERANCE = 10 -- ticks - matches layout_engine's TIE_DURATION_TOLERANCE scale
-function M.detect_rests(render_model, leading_tick, measure_ticks, beat_ticks_lookup)
-  local rests = {}
-  local classes = config.layout.duration_classes -- ascending by ticks
 
-  -- Largest fitting value among BOTH the plain classes and each one's own
-  -- dotted (1.5x) equivalent - e.g. a 1440-tick gap (a dotted quarter's
-  -- worth of silence) now classifies as 1440 (draw_notation.lua's
-  -- is_dotted_duration then recognizes it and adds the augmentation dot),
-  -- not as a plain 960-tick quarter rest that silently drops the extra 480
-  -- ticks. The smallest class (index 1, the 64th) has no dotted variant
-  -- checked, matching M.is_dotted_duration's own recognized floor (it
-  -- starts at the 32nd) - a dotted-64th isn't a value either function
-  -- treats as dotted. Each class's own dotted value (1.5x) is always less
-  -- than the NEXT class's plain value (2x), so checking plain-then-dotted
-  -- per class while walking classes in ascending order still visits every
-  -- candidate in true ascending numeric order overall - no separate sort
-  -- needed for "best" to end up as the actual largest fit.
-  local function classify(gap_ticks)
-    local best = nil
-    for i, c in ipairs(classes) do
-      if c.ticks <= gap_ticks then best = c.ticks end
-      if i > 1 then
-        local dotted = c.ticks * 1.5
-        if dotted <= gap_ticks then best = dotted end
+-- Largest fitting value among BOTH the plain duration classes and each
+-- one's own dotted (1.5x) equivalent - e.g. a 1440-tick span (a dotted
+-- quarter) classifies as 1440 (M.is_dotted_duration then recognizes it and
+-- adds the augmentation dot), not as a plain 960-tick quarter that silently
+-- drops the extra 480 ticks. The smallest class (index 1, the 64th) has no
+-- dotted variant checked, matching M.is_dotted_duration's own recognized
+-- floor (it starts at the 32nd) - a dotted-64th isn't a value either
+-- function treats as dotted. Each class's own dotted value (1.5x) is always
+-- less than the NEXT class's plain value (2x), so checking plain-then-
+-- dotted per class while walking classes in ascending order still visits
+-- every candidate in true ascending numeric order overall - no separate
+-- sort needed for "best" to end up as the actual largest fit.
+local function classify_duration(gap_ticks, classes)
+  local best = nil
+  for i, c in ipairs(classes) do
+    if c.ticks <= gap_ticks then best = c.ticks end
+    if i > 1 then
+      local dotted = c.ticks * 1.5
+      if dotted <= gap_ticks then best = dotted end
+    end
+  end
+  return best
+end
+
+-- Greedily decomposes a span of total_ticks starting at start_tick into
+-- consecutive standard-duration pieces (largest-fits-first, repeated on
+-- whatever's left) so the whole span is always accounted for, not just a
+-- single symbol that may fall short - e.g. 2.5 beats becomes a half (2
+-- beats) followed by an eighth (0.5 beats), not a single half that
+-- silently drops the last eighth. Beat-aware: while a piece's own start
+-- isn't itself on a beat boundary, that piece is also capped at whatever's
+-- left of the CURRENT beat (measure_start as the beat grid's own anchor,
+-- nil treated as tick 0), so a piece is never chosen so large it would
+-- swallow a beat boundary it didn't start on - e.g. 2.5 beats starting
+-- mid-beat-2 becomes an eighth (filling out beat 2) followed by a half
+-- (beats 3-4 exactly), not a half that happens to sum to the right total
+-- but splits at an arbitrary mid-beat point instead. Once a piece's start
+-- IS beat-aligned, the cap lifts entirely - a half or whole value starting
+-- cleanly on a beat is normal, expected notation even though it spans
+-- multiple beats itself. Only stops leaving a genuine remainder when
+-- what's left is smaller than the smallest recognized class (a 64th) -
+-- real MIDI timing imprecision, not an actual fraction of a beat going
+-- unaccounted for. Shared by M.detect_rests (independent rest symbols, no
+-- tie needed) and layout_engine.compute (tied notes - a sounding note
+-- needs the same decomposition, just joined with ties instead of drawn as
+-- separate symbols). Returns a list of {tick, duration_ticks}, possibly
+-- empty if total_ticks is itself below the smallest class (a grace note,
+-- or a barline-split fragment too short to classify at all) - callers
+-- should fall back to using the original undecomposed span in that case.
+function M.decompose_duration(start_tick, total_ticks, measure_start, beat_ticks_lookup)
+  local classes = config.layout.duration_classes -- ascending by ticks
+  local pieces = {}
+  local piece_start = start_tick
+  local remaining = total_ticks
+  local smallest = classes[1].ticks
+  while remaining >= smallest do
+    local cap = remaining
+    if beat_ticks_lookup then
+      local beat_ticks = beat_ticks_lookup(piece_start)
+      if beat_ticks and beat_ticks > 0 then
+        local offset = (piece_start - (measure_start or 0)) % beat_ticks
+        if offset > REST_BEAT_ALIGN_TOLERANCE then
+          cap = math.min(cap, beat_ticks - offset)
+        end
       end
     end
-    return best
+    -- Falls back to the full (uncapped) remaining if the beat-boundary cap
+    -- is too tight for even the smallest class to fit - still makes
+    -- forward progress rather than stalling, at the cost of that one piece
+    -- not being beat-aligned.
+    local duration = classify_duration(cap, classes) or classify_duration(remaining, classes)
+    if not duration then break end
+    pieces[#pieces + 1] = { tick = piece_start, duration_ticks = duration }
+    piece_start = piece_start + duration
+    remaining = remaining - duration
   end
+  return pieces
+end
+
+function M.detect_rests(render_model, leading_tick, measure_ticks, beat_ticks_lookup)
+  local rests = {}
 
   local function add_gap(gap_start, gap_ticks)
     local gap_end = gap_start + gap_ticks
@@ -929,39 +984,12 @@ function M.detect_rests(render_model, leading_tick, measure_ticks, beat_ticks_lo
           whole_measure = true,
         })
       else
-        -- Greedily decompose this segment into consecutive rest symbols
-        -- (largest-fits-first, repeated on whatever's left) so the whole
-        -- segment is always accounted for - see this function's own
-        -- header for why a single classify() call alone isn't enough.
-        -- Beat-aware: while rest_start isn't itself on a beat boundary,
-        -- each step is also capped at whatever's left of the current beat
-        -- (measure_start as the beat grid's own anchor, falling back to
-        -- tick 0 if measure_ticks wasn't given), so a rest symbol never
-        -- swallows a beat boundary it didn't start on - see this
-        -- function's own header for the worked example.
-        local rest_start = seg_start
-        local remaining = seg_end - seg_start
-        local smallest = classes[1].ticks
-        while remaining >= smallest do
-          local cap = remaining
-          if beat_ticks_lookup then
-            local beat_ticks = beat_ticks_lookup(rest_start)
-            if beat_ticks and beat_ticks > 0 then
-              local offset = (rest_start - (measure_start or 0)) % beat_ticks
-              if offset > REST_BEAT_ALIGN_TOLERANCE then
-                cap = math.min(cap, beat_ticks - offset)
-              end
-            end
-          end
-          -- Falls back to the full (uncapped) remaining if the beat-boundary
-          -- cap is too tight for even the smallest class to fit - still
-          -- makes forward progress rather than stalling, at the cost of
-          -- that one symbol not being beat-aligned.
-          local duration = classify(cap) or classify(remaining)
-          if not duration then break end
-          table.insert(rests, { tick = rest_start, duration_ticks = duration })
-          rest_start = rest_start + duration
-          remaining = remaining - duration
+        -- Greedily decompose this segment into consecutive rest symbols -
+        -- see M.decompose_duration's own header for the algorithm (largest-
+        -- fits-first, beat-aware) and worked example.
+        local pieces = M.decompose_duration(seg_start, seg_end - seg_start, measure_start, beat_ticks_lookup)
+        for _, p in ipairs(pieces) do
+          table.insert(rests, { tick = p.tick, duration_ticks = p.duration_ticks })
         end
       end
 
